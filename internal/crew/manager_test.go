@@ -2,6 +2,7 @@ package crew
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -9,194 +10,281 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
-func TestManager_workerDir(t *testing.T) {
-	r := &rig.Rig{
-		Name: "test-rig",
-		Path: "/tmp/test-rig",
-	}
-	m := NewManager(r, nil)
-
-	got := m.workerDir("alice")
-	want := "/tmp/test-rig/crew/alice"
-
-	if got != want {
-		t.Errorf("workerDir() = %q, want %q", got, want)
-	}
-}
-
-func TestManager_stateFile(t *testing.T) {
-	r := &rig.Rig{
-		Name: "test-rig",
-		Path: "/tmp/test-rig",
-	}
-	m := NewManager(r, nil)
-
-	got := m.stateFile("bob")
-	want := "/tmp/test-rig/crew/bob/state.json"
-
-	if got != want {
-		t.Errorf("stateFile() = %q, want %q", got, want)
-	}
-}
-
-func TestManager_exists(t *testing.T) {
-	// Create temp directory structure
-	tmpDir := t.TempDir()
-	crewDir := filepath.Join(tmpDir, "crew", "existing-worker")
-	if err := os.MkdirAll(crewDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	r := &rig.Rig{
-		Name: "test-rig",
-		Path: tmpDir,
-	}
-	m := NewManager(r, nil)
-
-	tests := []struct {
-		name   string
-		worker string
-		want   bool
-	}{
-		{"existing worker", "existing-worker", true},
-		{"non-existing worker", "non-existing", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := m.exists(tt.worker)
-			if got != tt.want {
-				t.Errorf("exists(%q) = %v, want %v", tt.worker, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestManager_List_Empty(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	r := &rig.Rig{
-		Name: "test-rig",
-		Path: tmpDir,
-	}
-	m := NewManager(r, git.NewGit(tmpDir))
-
-	workers, err := m.List()
+func TestManagerAddAndGet(t *testing.T) {
+	// Create temp directory for test
+	tmpDir, err := os.MkdirTemp("", "crew-test-*")
 	if err != nil {
-		t.Fatalf("List() error = %v", err)
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create a mock rig
+	rigPath := filepath.Join(tmpDir, "test-rig")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatalf("failed to create rig dir: %v", err)
 	}
 
+	// Initialize git repo for the rig
+	g := git.NewGit(rigPath)
+
+	// For testing, we need a git URL - use a local bare repo
+	bareRepoPath := filepath.Join(tmpDir, "bare-repo.git")
+	cmd := []string{"git", "init", "--bare", bareRepoPath}
+	if err := runCmd(cmd[0], cmd[1:]...); err != nil {
+		t.Fatalf("failed to create bare repo: %v", err)
+	}
+
+	r := &rig.Rig{
+		Name:   "test-rig",
+		Path:   rigPath,
+		GitURL: bareRepoPath,
+	}
+
+	mgr := NewManager(r, g)
+
+	// Test Add
+	worker, err := mgr.Add("dave", false)
+	if err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+
+	if worker.Name != "dave" {
+		t.Errorf("expected name 'dave', got '%s'", worker.Name)
+	}
+	if worker.Rig != "test-rig" {
+		t.Errorf("expected rig 'test-rig', got '%s'", worker.Rig)
+	}
+	if worker.Branch != "main" {
+		t.Errorf("expected branch 'main', got '%s'", worker.Branch)
+	}
+
+	// Verify directory structure
+	crewDir := filepath.Join(rigPath, "crew", "dave")
+	if _, err := os.Stat(crewDir); os.IsNotExist(err) {
+		t.Error("crew directory was not created")
+	}
+
+	mailDir := filepath.Join(crewDir, "mail")
+	if _, err := os.Stat(mailDir); os.IsNotExist(err) {
+		t.Error("mail directory was not created")
+	}
+
+	claudeMD := filepath.Join(crewDir, "CLAUDE.md")
+	if _, err := os.Stat(claudeMD); os.IsNotExist(err) {
+		t.Error("CLAUDE.md was not created")
+	}
+
+	stateFile := filepath.Join(crewDir, "state.json")
+	if _, err := os.Stat(stateFile); os.IsNotExist(err) {
+		t.Error("state.json was not created")
+	}
+
+	// Test Get
+	retrieved, err := mgr.Get("dave")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if retrieved.Name != "dave" {
+		t.Errorf("expected name 'dave', got '%s'", retrieved.Name)
+	}
+
+	// Test duplicate Add
+	_, err = mgr.Add("dave", false)
+	if err != ErrCrewExists {
+		t.Errorf("expected ErrCrewExists, got %v", err)
+	}
+
+	// Test Get non-existent
+	_, err = mgr.Get("nonexistent")
+	if err != ErrCrewNotFound {
+		t.Errorf("expected ErrCrewNotFound, got %v", err)
+	}
+}
+
+func TestManagerAddWithBranch(t *testing.T) {
+	// Create temp directory for test
+	tmpDir, err := os.MkdirTemp("", "crew-test-branch-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create a mock rig
+	rigPath := filepath.Join(tmpDir, "test-rig")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatalf("failed to create rig dir: %v", err)
+	}
+
+	g := git.NewGit(rigPath)
+
+	// Create a local repo with initial commit for branch testing
+	sourceRepoPath := filepath.Join(tmpDir, "source-repo")
+	if err := os.MkdirAll(sourceRepoPath, 0755); err != nil {
+		t.Fatalf("failed to create source repo dir: %v", err)
+	}
+
+	// Initialize source repo with a commit
+	cmds := [][]string{
+		{"git", "-C", sourceRepoPath, "init"},
+		{"git", "-C", sourceRepoPath, "config", "user.email", "test@test.com"},
+		{"git", "-C", sourceRepoPath, "config", "user.name", "Test"},
+	}
+	for _, cmd := range cmds {
+		if err := runCmd(cmd[0], cmd[1:]...); err != nil {
+			t.Fatalf("failed to run %v: %v", cmd, err)
+		}
+	}
+
+	// Create initial file and commit
+	testFile := filepath.Join(sourceRepoPath, "README.md")
+	if err := os.WriteFile(testFile, []byte("# Test"), 0644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	cmds = [][]string{
+		{"git", "-C", sourceRepoPath, "add", "."},
+		{"git", "-C", sourceRepoPath, "commit", "-m", "Initial commit"},
+	}
+	for _, cmd := range cmds {
+		if err := runCmd(cmd[0], cmd[1:]...); err != nil {
+			t.Fatalf("failed to run %v: %v", cmd, err)
+		}
+	}
+
+	r := &rig.Rig{
+		Name:   "test-rig",
+		Path:   rigPath,
+		GitURL: sourceRepoPath,
+	}
+
+	mgr := NewManager(r, g)
+
+	// Test Add with branch
+	worker, err := mgr.Add("emma", true)
+	if err != nil {
+		t.Fatalf("Add with branch failed: %v", err)
+	}
+
+	if worker.Branch != "crew/emma" {
+		t.Errorf("expected branch 'crew/emma', got '%s'", worker.Branch)
+	}
+}
+
+func TestManagerList(t *testing.T) {
+	// Create temp directory for test
+	tmpDir, err := os.MkdirTemp("", "crew-test-list-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create a mock rig
+	rigPath := filepath.Join(tmpDir, "test-rig")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatalf("failed to create rig dir: %v", err)
+	}
+
+	g := git.NewGit(rigPath)
+
+	// Create a bare repo for cloning
+	bareRepoPath := filepath.Join(tmpDir, "bare-repo.git")
+	if err := runCmd("git", "init", "--bare", bareRepoPath); err != nil {
+		t.Fatalf("failed to create bare repo: %v", err)
+	}
+
+	r := &rig.Rig{
+		Name:   "test-rig",
+		Path:   rigPath,
+		GitURL: bareRepoPath,
+	}
+
+	mgr := NewManager(r, g)
+
+	// Initially empty
+	workers, err := mgr.List()
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
 	if len(workers) != 0 {
-		t.Errorf("List() returned %d workers, want 0", len(workers))
+		t.Errorf("expected 0 workers, got %d", len(workers))
+	}
+
+	// Add some workers
+	_, err = mgr.Add("alice", false)
+	if err != nil {
+		t.Fatalf("Add alice failed: %v", err)
+	}
+	_, err = mgr.Add("bob", false)
+	if err != nil {
+		t.Fatalf("Add bob failed: %v", err)
+	}
+
+	workers, err = mgr.List()
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if len(workers) != 2 {
+		t.Errorf("expected 2 workers, got %d", len(workers))
 	}
 }
 
-func TestManager_List_WithWorkers(t *testing.T) {
-	tmpDir := t.TempDir()
+func TestManagerRemove(t *testing.T) {
+	// Create temp directory for test
+	tmpDir, err := os.MkdirTemp("", "crew-test-remove-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
 
-	// Create some fake worker directories
-	workers := []string{"alice", "bob", "charlie"}
-	for _, name := range workers {
-		workerDir := filepath.Join(tmpDir, "crew", name)
-		if err := os.MkdirAll(workerDir, 0755); err != nil {
-			t.Fatal(err)
-		}
+	// Create a mock rig
+	rigPath := filepath.Join(tmpDir, "test-rig")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatalf("failed to create rig dir: %v", err)
+	}
+
+	g := git.NewGit(rigPath)
+
+	// Create a bare repo for cloning
+	bareRepoPath := filepath.Join(tmpDir, "bare-repo.git")
+	if err := runCmd("git", "init", "--bare", bareRepoPath); err != nil {
+		t.Fatalf("failed to create bare repo: %v", err)
 	}
 
 	r := &rig.Rig{
-		Name: "test-rig",
-		Path: tmpDir,
+		Name:   "test-rig",
+		Path:   rigPath,
+		GitURL: bareRepoPath,
 	}
-	m := NewManager(r, git.NewGit(tmpDir))
 
-	gotWorkers, err := m.List()
+	mgr := NewManager(r, g)
+
+	// Add a worker
+	_, err = mgr.Add("charlie", false)
 	if err != nil {
-		t.Fatalf("List() error = %v", err)
+		t.Fatalf("Add failed: %v", err)
 	}
 
-	if len(gotWorkers) != len(workers) {
-		t.Errorf("List() returned %d workers, want %d", len(gotWorkers), len(workers))
-	}
-}
-
-func TestManager_Names(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Create some fake worker directories
-	expected := []string{"alice", "bob"}
-	for _, name := range expected {
-		workerDir := filepath.Join(tmpDir, "crew", name)
-		if err := os.MkdirAll(workerDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	r := &rig.Rig{
-		Name: "test-rig",
-		Path: tmpDir,
-	}
-	m := NewManager(r, git.NewGit(tmpDir))
-
-	names, err := m.Names()
+	// Remove it (with force since CLAUDE.md is uncommitted)
+	err = mgr.Remove("charlie", true)
 	if err != nil {
-		t.Fatalf("Names() error = %v", err)
+		t.Fatalf("Remove failed: %v", err)
 	}
 
-	if len(names) != len(expected) {
-		t.Errorf("Names() returned %d names, want %d", len(names), len(expected))
+	// Verify it's gone
+	_, err = mgr.Get("charlie")
+	if err != ErrCrewNotFound {
+		t.Errorf("expected ErrCrewNotFound, got %v", err)
+	}
+
+	// Remove non-existent
+	err = mgr.Remove("nonexistent", false)
+	if err != ErrCrewNotFound {
+		t.Errorf("expected ErrCrewNotFound, got %v", err)
 	}
 }
 
-func TestWorker_EffectiveBeadsDir(t *testing.T) {
-	tests := []struct {
-		name     string
-		beadsDir string
-		rigPath  string
-		want     string
-	}{
-		{
-			name:     "custom beads dir",
-			beadsDir: "/custom/beads",
-			rigPath:  "/tmp/rig",
-			want:     "/custom/beads",
-		},
-		{
-			name:     "default beads dir",
-			beadsDir: "",
-			rigPath:  "/tmp/rig",
-			want:     "/tmp/rig/.beads",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			w := &Worker{
-				BeadsDir: tt.beadsDir,
-			}
-			got := w.EffectiveBeadsDir(tt.rigPath)
-			if got != tt.want {
-				t.Errorf("EffectiveBeadsDir() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestWorker_Summary(t *testing.T) {
-	w := &Worker{
-		Name:   "alice",
-		State:  StateActive,
-		Branch: "feature/test",
-	}
-
-	got := w.Summary()
-
-	if got.Name != w.Name {
-		t.Errorf("Summary().Name = %q, want %q", got.Name, w.Name)
-	}
-	if got.State != w.State {
-		t.Errorf("Summary().State = %q, want %q", got.State, w.State)
-	}
-	if got.Branch != w.Branch {
-		t.Errorf("Summary().Branch = %q, want %q", got.Branch, w.Branch)
-	}
+// Helper to run commands
+func runCmd(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	return cmd.Run()
 }

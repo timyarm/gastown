@@ -14,9 +14,9 @@ import (
 
 // Common errors
 var (
-	ErrWorkerExists   = errors.New("crew worker already exists")
-	ErrWorkerNotFound = errors.New("crew worker not found")
-	ErrHasChanges     = errors.New("crew worker has uncommitted changes")
+	ErrCrewExists   = errors.New("crew worker already exists")
+	ErrCrewNotFound = errors.New("crew worker not found")
+	ErrHasChanges   = errors.New("crew worker has uncommitted changes")
 )
 
 // Manager handles crew worker lifecycle.
@@ -33,121 +33,176 @@ func NewManager(r *rig.Rig, g *git.Git) *Manager {
 	}
 }
 
-// workerDir returns the directory for a crew worker.
-func (m *Manager) workerDir(name string) string {
+// crewDir returns the directory for a crew worker.
+func (m *Manager) crewDir(name string) string {
 	return filepath.Join(m.rig.Path, "crew", name)
 }
 
 // stateFile returns the state file path for a crew worker.
 func (m *Manager) stateFile(name string) string {
-	return filepath.Join(m.workerDir(name), "state.json")
+	return filepath.Join(m.crewDir(name), "state.json")
+}
+
+// mailDir returns the mail directory path for a crew worker.
+func (m *Manager) mailDir(name string) string {
+	return filepath.Join(m.crewDir(name), "mail")
 }
 
 // exists checks if a crew worker exists.
 func (m *Manager) exists(name string) bool {
-	_, err := os.Stat(m.workerDir(name))
+	_, err := os.Stat(m.crewDir(name))
 	return err == nil
 }
 
 // Add creates a new crew worker with a clone of the rig.
-func (m *Manager) Add(name string) (*Worker, error) {
+func (m *Manager) Add(name string, createBranch bool) (*CrewWorker, error) {
 	if m.exists(name) {
-		return nil, ErrWorkerExists
+		return nil, ErrCrewExists
 	}
 
-	workerPath := m.workerDir(name)
+	crewPath := m.crewDir(name)
 
 	// Create crew directory if needed
-	crewDir := filepath.Join(m.rig.Path, "crew")
-	if err := os.MkdirAll(crewDir, 0755); err != nil {
+	crewBaseDir := filepath.Join(m.rig.Path, "crew")
+	if err := os.MkdirAll(crewBaseDir, 0755); err != nil {
 		return nil, fmt.Errorf("creating crew dir: %w", err)
 	}
 
 	// Clone the rig repo
-	if err := m.git.Clone(m.rig.GitURL, workerPath); err != nil {
+	if err := m.git.Clone(m.rig.GitURL, crewPath); err != nil {
 		return nil, fmt.Errorf("cloning rig: %w", err)
+	}
+
+	crewGit := git.NewGit(crewPath)
+	branchName := "main"
+
+	// Optionally create a working branch
+	if createBranch {
+		branchName = fmt.Sprintf("crew/%s", name)
+		if err := crewGit.CreateBranch(branchName); err != nil {
+			os.RemoveAll(crewPath)
+			return nil, fmt.Errorf("creating branch: %w", err)
+		}
+		if err := crewGit.Checkout(branchName); err != nil {
+			os.RemoveAll(crewPath)
+			return nil, fmt.Errorf("checking out branch: %w", err)
+		}
+	}
+
+	// Create mail directory for mail delivery
+	mailPath := m.mailDir(name)
+	if err := os.MkdirAll(mailPath, 0755); err != nil {
+		os.RemoveAll(crewPath)
+		return nil, fmt.Errorf("creating mail dir: %w", err)
+	}
+
+	// Create CLAUDE.md with crew worker prompting
+	if err := m.createClaudeMD(name, crewPath); err != nil {
+		os.RemoveAll(crewPath)
+		return nil, fmt.Errorf("creating CLAUDE.md: %w", err)
 	}
 
 	// Create crew worker state
 	now := time.Now()
-	worker := &Worker{
+	crew := &CrewWorker{
 		Name:      name,
 		Rig:       m.rig.Name,
-		State:     StateActive,
-		ClonePath: workerPath,
+		ClonePath: crewPath,
+		Branch:    branchName,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
 
 	// Save state
-	if err := m.saveState(worker); err != nil {
-		os.RemoveAll(workerPath)
+	if err := m.saveState(crew); err != nil {
+		os.RemoveAll(crewPath)
 		return nil, fmt.Errorf("saving state: %w", err)
 	}
 
-	return worker, nil
+	return crew, nil
 }
 
-// AddWithConfig creates a new crew worker with custom configuration.
-func (m *Manager) AddWithConfig(name string, beadsDir string) (*Worker, error) {
-	worker, err := m.Add(name)
-	if err != nil {
-		return nil, err
-	}
+// createClaudeMD creates the CLAUDE.md file for crew worker prompting.
+func (m *Manager) createClaudeMD(name, crewPath string) error {
+	content := fmt.Sprintf(`# Claude: Crew Worker - %s
 
-	// Update with custom config
-	if beadsDir != "" {
-		worker.BeadsDir = beadsDir
-		if err := m.saveState(worker); err != nil {
-			return nil, fmt.Errorf("saving config: %w", err)
-		}
-	}
+You are a **crew worker** in the %s rig. Crew workers are user-managed persistent workspaces.
 
-	return worker, nil
+## Key Differences from Polecats
+
+- **User-managed**: You are NOT managed by the Witness daemon
+- **Persistent**: Your workspace is not automatically cleaned up
+- **Optional issue assignment**: You can work without a beads issue
+- **Mail enabled**: You can send and receive mail
+
+## Commands
+
+Check mail:
+`+"```bash"+`
+town mail inbox --as %s/%s
+`+"```"+`
+
+Send mail:
+`+"```bash"+`
+town mail send <recipient> -s "Subject" -m "Message" --as %s/%s
+`+"```"+`
+
+## Session Cycling (Handoff)
+
+When your context fills up, use mail-to-self for handoff:
+
+1. Compose a handoff note with current state
+2. Send to yourself: `+"```"+`town mail send %s/%s -s "Handoff" -m "..."--as %s/%s`+"```"+`
+3. Exit cleanly
+4. New session reads handoff from inbox
+
+## Beads
+
+If using beads for task tracking:
+`+"```bash"+`
+bd ready           # Find available work
+bd show <id>       # Review issue details
+bd update <id> --status=in_progress  # Claim it
+bd close <id>      # Mark complete
+`+"```"+`
+`, name, m.rig.Name,
+		m.rig.Name, name,
+		m.rig.Name, name,
+		m.rig.Name, name, m.rig.Name, name)
+
+	claudePath := filepath.Join(crewPath, "CLAUDE.md")
+	return os.WriteFile(claudePath, []byte(content), 0644)
 }
 
 // Remove deletes a crew worker.
-func (m *Manager) Remove(name string) error {
+func (m *Manager) Remove(name string, force bool) error {
 	if !m.exists(name) {
-		return ErrWorkerNotFound
+		return ErrCrewNotFound
 	}
 
-	workerPath := m.workerDir(name)
-	workerGit := git.NewGit(workerPath)
+	crewPath := m.crewDir(name)
 
-	// Check for uncommitted changes
-	hasChanges, err := workerGit.HasUncommittedChanges()
-	if err == nil && hasChanges {
-		return ErrHasChanges
+	if !force {
+		crewGit := git.NewGit(crewPath)
+		hasChanges, err := crewGit.HasUncommittedChanges()
+		if err == nil && hasChanges {
+			return ErrHasChanges
+		}
 	}
 
 	// Remove directory
-	if err := os.RemoveAll(workerPath); err != nil {
-		return fmt.Errorf("removing crew worker dir: %w", err)
-	}
-
-	return nil
-}
-
-// RemoveForce deletes a crew worker even with uncommitted changes.
-func (m *Manager) RemoveForce(name string) error {
-	if !m.exists(name) {
-		return ErrWorkerNotFound
-	}
-
-	workerPath := m.workerDir(name)
-	if err := os.RemoveAll(workerPath); err != nil {
-		return fmt.Errorf("removing crew worker dir: %w", err)
+	if err := os.RemoveAll(crewPath); err != nil {
+		return fmt.Errorf("removing crew dir: %w", err)
 	}
 
 	return nil
 }
 
 // List returns all crew workers in the rig.
-func (m *Manager) List() ([]*Worker, error) {
-	crewDir := filepath.Join(m.rig.Path, "crew")
+func (m *Manager) List() ([]*CrewWorker, error) {
+	crewBaseDir := filepath.Join(m.rig.Path, "crew")
 
-	entries, err := os.ReadDir(crewDir)
+	entries, err := os.ReadDir(crewBaseDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -155,7 +210,7 @@ func (m *Manager) List() ([]*Worker, error) {
 		return nil, fmt.Errorf("reading crew dir: %w", err)
 	}
 
-	var workers []*Worker
+	var workers []*CrewWorker
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -172,48 +227,22 @@ func (m *Manager) List() ([]*Worker, error) {
 }
 
 // Get returns a specific crew worker by name.
-func (m *Manager) Get(name string) (*Worker, error) {
+func (m *Manager) Get(name string) (*CrewWorker, error) {
 	if !m.exists(name) {
-		return nil, ErrWorkerNotFound
+		return nil, ErrCrewNotFound
 	}
 
 	return m.loadState(name)
 }
 
-// SetState updates a crew worker's state.
-func (m *Manager) SetState(name string, state State) error {
-	worker, err := m.Get(name)
-	if err != nil {
-		return err
-	}
-
-	worker.State = state
-	worker.UpdatedAt = time.Now()
-
-	return m.saveState(worker)
-}
-
-// SetBeadsDir updates the custom beads directory for a crew worker.
-func (m *Manager) SetBeadsDir(name, beadsDir string) error {
-	worker, err := m.Get(name)
-	if err != nil {
-		return err
-	}
-
-	worker.BeadsDir = beadsDir
-	worker.UpdatedAt = time.Now()
-
-	return m.saveState(worker)
-}
-
 // saveState persists crew worker state to disk.
-func (m *Manager) saveState(worker *Worker) error {
-	data, err := json.MarshalIndent(worker, "", "  ")
+func (m *Manager) saveState(crew *CrewWorker) error {
+	data, err := json.MarshalIndent(crew, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling state: %w", err)
 	}
 
-	stateFile := m.stateFile(worker.Name)
+	stateFile := m.stateFile(crew.Name)
 	if err := os.WriteFile(stateFile, data, 0644); err != nil {
 		return fmt.Errorf("writing state: %w", err)
 	}
@@ -222,49 +251,26 @@ func (m *Manager) saveState(worker *Worker) error {
 }
 
 // loadState reads crew worker state from disk.
-func (m *Manager) loadState(name string) (*Worker, error) {
+func (m *Manager) loadState(name string) (*CrewWorker, error) {
 	stateFile := m.stateFile(name)
 
 	data, err := os.ReadFile(stateFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// Return minimal worker if state file missing
-			return &Worker{
+			// Return minimal crew worker if state file missing
+			return &CrewWorker{
 				Name:      name,
 				Rig:       m.rig.Name,
-				State:     StateActive,
-				ClonePath: m.workerDir(name),
+				ClonePath: m.crewDir(name),
 			}, nil
 		}
 		return nil, fmt.Errorf("reading state: %w", err)
 	}
 
-	var worker Worker
-	if err := json.Unmarshal(data, &worker); err != nil {
+	var crew CrewWorker
+	if err := json.Unmarshal(data, &crew); err != nil {
 		return nil, fmt.Errorf("parsing state: %w", err)
 	}
 
-	return &worker, nil
-}
-
-// Names returns just the names of all crew workers.
-func (m *Manager) Names() ([]string, error) {
-	crewDir := filepath.Join(m.rig.Path, "crew")
-
-	entries, err := os.ReadDir(crewDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("reading crew dir: %w", err)
-	}
-
-	var names []string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			names = append(names, entry.Name())
-		}
-	}
-
-	return names, nil
+	return &crew, nil
 }
