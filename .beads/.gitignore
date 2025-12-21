@@ -26,8 +26,12 @@ beads.left.meta.json
 beads.right.jsonl
 beads.right.meta.json
 
-# Keep JSONL exports and config (source of truth for git)
-!issues.jsonl
+# JSONL exports: tracked on beads-sync branch, ignored on main
+# This prevents "modified issues.jsonl" noise in git status on main
+# bd sync commits to beads-sync, which has its own .gitignore that tracks issues.jsonl
+issues.jsonl
+
+# Metadata and config are tracked everywhere
 !metadata.json
 !config.json
 redirect
