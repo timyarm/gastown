@@ -74,6 +74,9 @@ func runPrime(cmd *cobra.Command, args []string) error {
 	// Detect role
 	ctx := detectRole(cwd, townRoot)
 
+	// Ensure beads redirect exists for worktree-based roles
+	ensureBeadsRedirect(ctx)
+
 	// Output context
 	if err := outputPrimeContext(ctx); err != nil {
 		return err
@@ -663,4 +666,82 @@ func outputDeaconPatrolContext(ctx RoleContext) {
 	fmt.Println("To start fresh patrol:")
 	fmt.Println("  bd close <in-progress-issues>")
 	fmt.Println("  gt mol bond mol-deacon-patrol")
+}
+
+// ensureBeadsRedirect ensures the .beads/redirect file exists for worktree-based roles.
+// This handles cases where git clean or other operations delete the redirect file.
+func ensureBeadsRedirect(ctx RoleContext) {
+	// Only applies to crew and polecat roles (they use shared beads)
+	if ctx.Role != RoleCrew && ctx.Role != RolePolecat {
+		return
+	}
+
+	// Check if redirect already exists
+	beadsDir := filepath.Join(ctx.WorkDir, ".beads")
+	redirectPath := filepath.Join(beadsDir, "redirect")
+
+	if _, err := os.Stat(redirectPath); err == nil {
+		// Redirect exists, nothing to do
+		return
+	}
+
+	// Determine the correct redirect path based on role and rig structure
+	var redirectContent string
+
+	// Get the rig root (parent of crew/ or polecats/)
+	var rigRoot string
+	relPath, err := filepath.Rel(ctx.TownRoot, ctx.WorkDir)
+	if err != nil {
+		return
+	}
+	parts := strings.Split(filepath.ToSlash(relPath), "/")
+	if len(parts) >= 1 {
+		rigRoot = filepath.Join(ctx.TownRoot, parts[0])
+	} else {
+		return
+	}
+
+	// Check for shared beads locations in order of preference:
+	// 1. rig/mayor/rig/.beads/ (if mayor rig clone exists)
+	// 2. rig/.beads/ (rig root beads)
+	mayorRigBeads := filepath.Join(rigRoot, "mayor", "rig", ".beads")
+	rigRootBeads := filepath.Join(rigRoot, ".beads")
+
+	if _, err := os.Stat(mayorRigBeads); err == nil {
+		// Use mayor/rig/.beads
+		if ctx.Role == RoleCrew {
+			// crew/<name>/.beads -> ../../mayor/rig/.beads
+			redirectContent = "../../mayor/rig/.beads"
+		} else {
+			// polecats/<name>/.beads -> ../../mayor/rig/.beads
+			redirectContent = "../../mayor/rig/.beads"
+		}
+	} else if _, err := os.Stat(rigRootBeads); err == nil {
+		// Use rig root .beads
+		if ctx.Role == RoleCrew {
+			// crew/<name>/.beads -> ../../.beads
+			redirectContent = "../../.beads"
+		} else {
+			// polecats/<name>/.beads -> ../../.beads
+			redirectContent = "../../.beads"
+		}
+	} else {
+		// No shared beads found, nothing to redirect to
+		return
+	}
+
+	// Create .beads directory if needed
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		// Silently fail - not critical
+		return
+	}
+
+	// Write redirect file
+	if err := os.WriteFile(redirectPath, []byte(redirectContent+"\n"), 0644); err != nil {
+		// Silently fail - not critical
+		return
+	}
+
+	// Note: We don't print a message here to avoid cluttering prime output
+	// The redirect is silently restored
 }
