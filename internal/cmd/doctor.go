@@ -61,6 +61,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	d.Register(doctor.NewBranchCheck())
 	d.Register(doctor.NewBeadsSyncOrphanCheck())
 	d.Register(doctor.NewIdentityCollisionCheck())
+	d.Register(doctor.NewLinkedPaneCheck())
 	d.Register(doctor.NewThemeCheck())
 
 	// Wisp storage checks
