@@ -1,4 +1,4 @@
-# Beads as Data Plane
+# Beads as Data Plane (CLAW)
 
 > **Status**: Design documentation
 > **See also**: [pinned-beads-design.md](pinned-beads-design.md), [propulsion-principle.md](propulsion-principle.md)
@@ -6,6 +6,11 @@
 ## Overview
 
 Gas Town agents coordinate through **Beads** - a git-backed issue tracker.
+
+**CLAW**: **C**ommits as **L**edger of **A**ll **W**ork. Git commits are the persistence
+mechanism. Every state change becomes a commit, giving us atomic updates, full history,
+and distributed sync for free.
+
 We store agent state (work assignments, mail, molecules, hooks) as beads issues.
 
 ## How We Use It

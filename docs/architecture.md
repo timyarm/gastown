@@ -212,9 +212,10 @@ sync-branch: beads-sync    # Separate branch for beads commits
 
 **Why sync-branch?** When multiple agents share a beads database, using a dedicated sync branch prevents beads commits from interleaving with code commits on feature branches.
 
-#### Beads as Data Plane
+#### Beads as Data Plane (CLAW)
 
-Gas Town uses Beads for persistence. We've combined the data plane and control plane:
+Gas Town uses Beads for persistence - **C**ommits as **L**edger of **A**ll **W**ork.
+We've combined the data plane and control plane:
 - Traditional systems separate "what's stored" from "what to do next"
 - We store both in beads, so agent state survives crashes
 
