@@ -30,11 +30,21 @@ func runMoleculeAttachFromMail(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace")
 	}
 
-	// Detect agent role and identity
-	roleCtx := detectRole(cwd, townRoot)
+	// Detect agent role and identity using env-aware detection
+	roleInfo, err := GetRoleWithContext(cwd, townRoot)
+	if err != nil {
+		return fmt.Errorf("detecting role: %w", err)
+	}
+	roleCtx := RoleContext{
+		Role:     roleInfo.Role,
+		Rig:      roleInfo.Rig,
+		Polecat:  roleInfo.Polecat,
+		TownRoot: townRoot,
+		WorkDir:  cwd,
+	}
 	agentIdentity := buildAgentIdentity(roleCtx)
 	if agentIdentity == "" {
-		return fmt.Errorf("cannot determine agent identity from current directory (role: %s)", roleCtx.Role)
+		return fmt.Errorf("cannot determine agent identity (role: %s)", roleCtx.Role)
 	}
 
 	// Get the agent's mailbox

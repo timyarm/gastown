@@ -289,11 +289,21 @@ func runMoleculeBurn(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 {
 		target = args[0]
 	} else {
-		// Auto-detect from current directory
-		roleCtx := detectRole(cwd, townRoot)
+		// Auto-detect using env-aware role detection
+		roleInfo, err := GetRoleWithContext(cwd, townRoot)
+		if err != nil {
+			return fmt.Errorf("detecting role: %w", err)
+		}
+		roleCtx := RoleContext{
+			Role:     roleInfo.Role,
+			Rig:      roleInfo.Rig,
+			Polecat:  roleInfo.Polecat,
+			TownRoot: townRoot,
+			WorkDir:  cwd,
+		}
 		target = buildAgentIdentity(roleCtx)
 		if target == "" {
-			return fmt.Errorf("cannot determine agent identity from current directory")
+			return fmt.Errorf("cannot determine agent identity (role: %s)", roleCtx.Role)
 		}
 	}
 
@@ -375,11 +385,21 @@ func runMoleculeSquash(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 {
 		target = args[0]
 	} else {
-		// Auto-detect from current directory
-		roleCtx := detectRole(cwd, townRoot)
+		// Auto-detect using env-aware role detection
+		roleInfo, err := GetRoleWithContext(cwd, townRoot)
+		if err != nil {
+			return fmt.Errorf("detecting role: %w", err)
+		}
+		roleCtx := RoleContext{
+			Role:     roleInfo.Role,
+			Rig:      roleInfo.Rig,
+			Polecat:  roleInfo.Polecat,
+			TownRoot: townRoot,
+			WorkDir:  cwd,
+		}
 		target = buildAgentIdentity(roleCtx)
 		if target == "" {
-			return fmt.Errorf("cannot determine agent identity from current directory")
+			return fmt.Errorf("cannot determine agent identity (role: %s)", roleCtx.Role)
 		}
 	}
 

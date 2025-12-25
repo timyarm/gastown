@@ -292,10 +292,20 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 		if err != nil || townRoot == "" {
 			return fmt.Errorf("not in a Gas Town workspace")
 		}
-		ctx := detectRole(cwd, townRoot)
+		roleInfo, err := GetRoleWithContext(cwd, townRoot)
+		if err != nil {
+			return fmt.Errorf("detecting role: %w", err)
+		}
+		ctx := RoleContext{
+			Role:     roleInfo.Role,
+			Rig:      roleInfo.Rig,
+			Polecat:  roleInfo.Polecat,
+			TownRoot: townRoot,
+			WorkDir:  cwd,
+		}
 		to = buildAgentIdentity(ctx)
 		if to == "" {
-			return fmt.Errorf("cannot determine identity from current directory (role: %s)", ctx.Role)
+			return fmt.Errorf("cannot determine identity (role: %s)", ctx.Role)
 		}
 	} else if len(args) > 0 {
 		to = args[0]

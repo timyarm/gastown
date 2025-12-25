@@ -339,12 +339,15 @@ func runRigReset(cmd *cobra.Command, args []string) error {
 	// Determine role to reset
 	roleKey := rigResetRole
 	if roleKey == "" {
-		// Auto-detect from cwd
-		ctx := detectRole(cwd, townRoot)
-		if ctx.Role == RoleUnknown {
-			return fmt.Errorf("could not detect role from current directory; use --role to specify")
+		// Auto-detect using env-aware role detection
+		roleInfo, err := GetRoleWithContext(cwd, townRoot)
+		if err != nil {
+			return fmt.Errorf("detecting role: %w", err)
 		}
-		roleKey = string(ctx.Role)
+		if roleInfo.Role == RoleUnknown {
+			return fmt.Errorf("could not detect role; use --role to specify")
+		}
+		roleKey = string(roleInfo.Role)
 	}
 
 	// If no specific flags, reset all; otherwise only reset what's specified
