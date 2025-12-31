@@ -201,6 +201,16 @@ func (m *Manager) Start(polecat string, opts StartOptions) error {
 		// Non-fatal: session works without beacon
 	}
 
+	// GUPP: Gas Town Universal Propulsion Principle
+	// Send the propulsion nudge to trigger autonomous work execution.
+	// The beacon alone is just metadata - this nudge is the actual instruction
+	// that triggers Claude to check the hook and begin work.
+	// Small delay to ensure beacon is processed first.
+	time.Sleep(500 * time.Millisecond)
+	if err := m.tmux.NudgeSession(sessionID, PropulsionNudge()); err != nil {
+		// Non-fatal: witness can still nudge later
+	}
+
 	return nil
 }
 

@@ -57,3 +57,11 @@ func SessionBeacon(address, molID string) string {
 	timestamp := time.Now().Format("2006-01-02T15:04")
 	return fmt.Sprintf("[GAS TOWN] %s • %s • %s", address, molID, timestamp)
 }
+
+// PropulsionNudge generates the GUPP (Gas Town Universal Propulsion Principle) nudge.
+// This is sent after the beacon to trigger autonomous work execution.
+// The agent receives this as user input, triggering the propulsion principle:
+// "If work is on your hook, YOU RUN IT."
+func PropulsionNudge() string {
+	return "Run `gt mol status` to check your hook and begin work."
+}
