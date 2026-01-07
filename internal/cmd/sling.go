@@ -23,6 +23,39 @@ import (
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
+type wispCreateJSON struct {
+	NewEpicID string `json:"new_epic_id"`
+	RootID    string `json:"root_id"`
+	ResultID  string `json:"result_id"`
+}
+
+func parseWispIDFromJSON(jsonOutput []byte) (string, error) {
+	var result wispCreateJSON
+	if err := json.Unmarshal(jsonOutput, &result); err != nil {
+		return "", fmt.Errorf("parsing wisp JSON: %w (output: %s)", err, trimJSONForError(jsonOutput))
+	}
+
+	switch {
+	case result.NewEpicID != "":
+		return result.NewEpicID, nil
+	case result.RootID != "":
+		return result.RootID, nil
+	case result.ResultID != "":
+		return result.ResultID, nil
+	default:
+		return "", fmt.Errorf("wisp JSON missing id field (expected one of new_epic_id, root_id, result_id); output: %s", trimJSONForError(jsonOutput))
+	}
+}
+
+func trimJSONForError(jsonOutput []byte) string {
+	s := strings.TrimSpace(string(jsonOutput))
+	const maxLen = 500
+	if len(s) > maxLen {
+		return s[:maxLen] + "..."
+	}
+	return s
+}
+
 var slingCmd = &cobra.Command{
 	Use:     "sling <bead-or-formula> [target]",
 	GroupID: GroupWork,
@@ -372,13 +405,10 @@ func runSling(cmd *cobra.Command, args []string) error {
 		}
 
 		// Parse wisp output to get the root ID
-		var wispResult struct {
-			RootID string `json:"root_id"`
-		}
-		if err := json.Unmarshal(wispOut, &wispResult); err != nil {
+		wispRootID, err := parseWispIDFromJSON(wispOut)
+		if err != nil {
 			return fmt.Errorf("parsing wisp output: %w", err)
 		}
-		wispRootID := wispResult.RootID
 		fmt.Printf("%s Formula wisp created: %s\n", style.Bold.Render("✓"), wispRootID)
 
 		// Step 3: Bond wisp to original bead (creates compound)
@@ -924,21 +954,17 @@ func runSlingFormula(args []string) error {
 	}
 
 	// Parse wisp output to get the root ID
-	var wispResult struct {
-		RootID string `json:"root_id"`
-	}
-	if err := json.Unmarshal(wispOut, &wispResult); err != nil {
-		// Fallback: use formula name as identifier, but warn user
-		fmt.Printf("%s Could not parse wisp output, using formula name as ID\n", style.Dim.Render("Warning:"))
-		wispResult.RootID = formulaName
+	wispRootID, err := parseWispIDFromJSON(wispOut)
+	if err != nil {
+		return fmt.Errorf("parsing wisp output: %w", err)
 	}
 
-	fmt.Printf("%s Wisp created: %s\n", style.Bold.Render("✓"), wispResult.RootID)
+	fmt.Printf("%s Wisp created: %s\n", style.Bold.Render("✓"), wispRootID)
 
 	// Step 3: Hook the wisp bead using bd update.
 	// See: https://github.com/steveyegge/gastown/issues/148
-	hookCmd := exec.Command("bd", "--no-daemon", "update", wispResult.RootID, "--status=hooked", "--assignee="+targetAgent)
-	hookCmd.Dir = beads.ResolveHookDir(townRoot, wispResult.RootID, "")
+	hookCmd := exec.Command("bd", "--no-daemon", "update", wispRootID, "--status=hooked", "--assignee="+targetAgent)
+	hookCmd.Dir = beads.ResolveHookDir(townRoot, wispRootID, "")
 	hookCmd.Stderr = os.Stderr
 	if err := hookCmd.Run(); err != nil {
 		return fmt.Errorf("hooking wisp bead: %w", err)
@@ -947,23 +973,23 @@ func runSlingFormula(args []string) error {
 
 	// Log sling event to activity feed (formula slinging)
 	actor := detectActor()
-	payload := events.SlingPayload(wispResult.RootID, targetAgent)
+	payload := events.SlingPayload(wispRootID, targetAgent)
 	payload["formula"] = formulaName
 	_ = events.LogFeed(events.TypeSling, actor, payload)
 
 	// Update agent bead's hook_bead field (ZFC: agents track their current work)
 	// Note: formula slinging uses town root as workDir (no polecat-specific path)
-	updateAgentHookBead(targetAgent, wispResult.RootID, "", townBeadsDir)
+	updateAgentHookBead(targetAgent, wispRootID, "", townBeadsDir)
 
 	// Store dispatcher in bead description (enables completion notification to dispatcher)
-	if err := storeDispatcherInBead(wispResult.RootID, actor); err != nil {
+	if err := storeDispatcherInBead(wispRootID, actor); err != nil {
 		// Warn but don't fail - polecat will still complete work
 		fmt.Printf("%s Could not store dispatcher in bead: %v\n", style.Dim.Render("Warning:"), err)
 	}
 
 	// Store args in wisp bead if provided (no-tmux mode: beads as data plane)
 	if slingArgs != "" {
-		if err := storeArgsInBead(wispResult.RootID, slingArgs); err != nil {
+		if err := storeArgsInBead(wispRootID, slingArgs); err != nil {
 			fmt.Printf("%s Could not store args in bead: %v\n", style.Dim.Render("Warning:"), err)
 		} else {
 			fmt.Printf("%s Args stored in bead (durable)\n", style.Bold.Render("✓"))
