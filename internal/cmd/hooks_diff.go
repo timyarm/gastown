@@ -1,11 +1,8 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
@@ -110,19 +107,8 @@ func runHooksDiff(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Exit with code 1 to indicate changes pending
-	os.Exit(1)
-	return nil
-}
-
-// hookChange represents a single change in a hook type.
-type hookChange struct {
-	HookType string
-	Kind     string // "add", "remove", "modify"
-	Matcher  string
-	OldCmd   string
-	NewCmd   string
-	Count    int // for bulk add/remove
+	// Exit with code 1 to indicate changes pending (for scripting)
+	return NewSilentExit(1)
 }
 
 // diffHooksConfigs compares current and expected configs, returning formatted diff lines.
@@ -212,23 +198,20 @@ func diffCommands(hookType, matcher string, current, expected hooks.HookEntry) [
 		maxLen = len(expected.Hooks)
 	}
 
+	matcherSuffix := ""
+	if matcher != "" {
+		matcherSuffix = fmt.Sprintf("[%s]", matcher)
+	}
+
 	for i := 0; i < maxLen; i++ {
 		if i >= len(current.Hooks) {
 			// New hook added
-			matcherSuffix := ""
-			if matcher != "" {
-				matcherSuffix = fmt.Sprintf("[%s]", matcher)
-			}
 			lines = append(lines, fmt.Sprintf("  %s%s.hooks[%d].command:\n", hookType, matcherSuffix, i))
 			lines = append(lines, fmt.Sprintf("    %s\n", diffAdd.Render("+ "+expected.Hooks[i].Command)))
 			continue
 		}
 		if i >= len(expected.Hooks) {
 			// Hook removed
-			matcherSuffix := ""
-			if matcher != "" {
-				matcherSuffix = fmt.Sprintf("[%s]", matcher)
-			}
 			lines = append(lines, fmt.Sprintf("  %s%s.hooks[%d].command:\n", hookType, matcherSuffix, i))
 			lines = append(lines, fmt.Sprintf("    %s\n", diffRemove.Render("- "+current.Hooks[i].Command)))
 			continue
@@ -236,10 +219,6 @@ func diffCommands(hookType, matcher string, current, expected hooks.HookEntry) [
 
 		// Both exist - compare
 		if current.Hooks[i].Command != expected.Hooks[i].Command {
-			matcherSuffix := ""
-			if matcher != "" {
-				matcherSuffix = fmt.Sprintf("[%s]", matcher)
-			}
 			lines = append(lines, fmt.Sprintf("  %s%s.hooks[%d].command:\n", hookType, matcherSuffix, i))
 			lines = append(lines, fmt.Sprintf("    %s\n", diffRemove.Render("- "+truncateCommand(current.Hooks[i].Command))))
 			lines = append(lines, fmt.Sprintf("    %s\n", diffAdd.Render("+ "+truncateCommand(expected.Hooks[i].Command))))
@@ -272,26 +251,4 @@ func truncateCommand(cmd string) string {
 		return cmd
 	}
 	return cmd[:37] + "..." + cmd[len(cmd)-37:]
-}
-
-// diffSettingsJSON produces a JSON diff for debugging or --json output.
-func diffSettingsJSON(current, expected *hooks.HooksConfig) (string, error) {
-	type diffOutput struct {
-		Current  *hooks.HooksConfig `json:"current"`
-		Expected *hooks.HooksConfig `json:"expected"`
-	}
-	data, err := json.MarshalIndent(diffOutput{current, expected}, "", "  ")
-	if err != nil {
-		return "", err
-	}
-	return string(data), nil
-}
-
-// relativeSettingsPath returns the relative path from townRoot, using forward slashes.
-func relativeSettingsPath(townRoot, fullPath string) string {
-	rel, err := filepath.Rel(townRoot, fullPath)
-	if err != nil {
-		return fullPath
-	}
-	return strings.ReplaceAll(rel, string(filepath.Separator), "/")
 }

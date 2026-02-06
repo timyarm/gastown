@@ -35,11 +35,91 @@ type HooksConfig struct {
 }
 
 // SettingsJSON represents the full Claude Code settings.json structure.
-// Non-hooks fields are preserved during sync.
+// Unknown fields are preserved during sync via the Extra map.
 type SettingsJSON struct {
-	EditorMode     string            `json:"editorMode,omitempty"`
-	EnabledPlugins map[string]bool   `json:"enabledPlugins,omitempty"`
-	Hooks          HooksConfig       `json:"hooks"`
+	EditorMode     string          `json:"-"`
+	EnabledPlugins map[string]bool `json:"-"`
+	Hooks          HooksConfig     `json:"-"`
+	// Extra holds all raw fields for roundtrip preservation.
+	Extra map[string]json.RawMessage `json:"-"`
+}
+
+// UnmarshalSettings parses a settings.json file, preserving all fields.
+func UnmarshalSettings(data []byte) (*SettingsJSON, error) {
+	s := &SettingsJSON{
+		Extra: make(map[string]json.RawMessage),
+	}
+
+	// Capture everything into the raw map
+	if err := json.Unmarshal(data, &s.Extra); err != nil {
+		return nil, err
+	}
+
+	// Extract known fields
+	if raw, ok := s.Extra["editorMode"]; ok {
+		json.Unmarshal(raw, &s.EditorMode)
+	}
+	if raw, ok := s.Extra["enabledPlugins"]; ok {
+		json.Unmarshal(raw, &s.EnabledPlugins)
+	}
+	if raw, ok := s.Extra["hooks"]; ok {
+		json.Unmarshal(raw, &s.Hooks)
+	}
+
+	return s, nil
+}
+
+// MarshalSettings serializes a SettingsJSON, preserving unknown fields.
+func MarshalSettings(s *SettingsJSON) ([]byte, error) {
+	if s.Extra == nil {
+		s.Extra = make(map[string]json.RawMessage)
+	}
+
+	// Write known fields back into the map
+	if s.EditorMode != "" {
+		raw, _ := json.Marshal(s.EditorMode)
+		s.Extra["editorMode"] = raw
+	}
+	if s.EnabledPlugins != nil {
+		raw, _ := json.Marshal(s.EnabledPlugins)
+		s.Extra["enabledPlugins"] = raw
+	}
+
+	// Always write hooks (even if empty, it's the managed section)
+	raw, err := json.Marshal(s.Hooks)
+	if err != nil {
+		return nil, err
+	}
+	s.Extra["hooks"] = raw
+
+	return json.MarshalIndent(s.Extra, "", "  ")
+}
+
+// LoadSettings reads and parses a settings.json file, preserving unknown fields.
+// Returns a zero-value SettingsJSON if the file doesn't exist.
+func LoadSettings(path string) (*SettingsJSON, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &SettingsJSON{}, nil
+		}
+		return nil, err
+	}
+	return UnmarshalSettings(data)
+}
+
+// HooksEqual returns true if two HooksConfigs are structurally equal.
+// Compares by serializing to JSON for reliable deep equality.
+func HooksEqual(a, b *HooksConfig) bool {
+	aj, err := json.Marshal(a)
+	if err != nil {
+		return false
+	}
+	bj, err := json.Marshal(b)
+	if err != nil {
+		return false
+	}
+	return string(aj) == string(bj)
 }
 
 // Target represents a managed settings.json location.
@@ -48,6 +128,311 @@ type Target struct {
 	Key  string // Override key: "gastown/crew", "mayor", etc.
 	Rig  string // Rig name or empty for town-level
 	Role string // crew, witness, refinery, polecats, mayor, deacon
+}
+
+// DisplayKey returns a human-readable label for the target.
+// For targets with a rig, shows "rig/role"; for town-level targets, shows the role.
+func (t Target) DisplayKey() string {
+	if t.Rig != "" {
+		return t.Rig + "/" + t.Role
+	}
+	return t.Role
+}
+
+// Merge merges an override config into a base config using per-matcher merging.
+// For each hook type present in the override:
+//   - Same matcher: override replaces the base entry entirely
+//   - Different matcher: both entries are included (base first, then override)
+//   - Empty hooks list on a matcher: removes that entry (explicit disable)
+//
+// Hook types not present in the override are preserved from the base.
+func Merge(base, override *HooksConfig) *HooksConfig {
+	result := copyConfig(base)
+
+	for _, eventType := range EventTypes {
+		overrideEntries := override.GetEntries(eventType)
+		if len(overrideEntries) == 0 {
+			continue
+		}
+
+		baseEntries := result.GetEntries(eventType)
+		if baseEntries == nil {
+			baseEntries = []HookEntry{}
+		}
+
+		for _, oe := range overrideEntries {
+			replaced := false
+			for i, be := range baseEntries {
+				if be.Matcher == oe.Matcher {
+					replaced = true
+					if len(oe.Hooks) == 0 {
+						// Explicit disable: remove this entry
+						baseEntries = append(baseEntries[:i], baseEntries[i+1:]...)
+					} else {
+						baseEntries[i] = oe
+					}
+					break
+				}
+			}
+			if !replaced && len(oe.Hooks) > 0 {
+				baseEntries = append(baseEntries, oe)
+			}
+		}
+
+		result.SetEntries(eventType, baseEntries)
+	}
+
+	return result
+}
+
+// copyConfig creates a deep copy of a HooksConfig.
+func copyConfig(c *HooksConfig) *HooksConfig {
+	if c == nil {
+		return &HooksConfig{}
+	}
+	result := &HooksConfig{}
+	for _, eventType := range EventTypes {
+		entries := c.GetEntries(eventType)
+		if entries == nil {
+			continue
+		}
+		copied := make([]HookEntry, len(entries))
+		for i, e := range entries {
+			copied[i] = HookEntry{
+				Matcher: e.Matcher,
+				Hooks:   make([]Hook, len(e.Hooks)),
+			}
+			copy(copied[i].Hooks, e.Hooks)
+		}
+		result.SetEntries(eventType, copied)
+	}
+	return result
+}
+
+// ComputeExpected computes the expected HooksConfig for a target by loading
+// the base config and applying all applicable overrides in order of specificity.
+// If no base config exists, uses DefaultBase().
+func ComputeExpected(target string) (*HooksConfig, error) {
+	base, err := LoadBase()
+	if err != nil {
+		if os.IsNotExist(err) {
+			base = DefaultBase()
+		} else {
+			return nil, fmt.Errorf("loading base config: %w", err)
+		}
+	}
+
+	result := base
+	for _, overrideKey := range GetApplicableOverrides(target) {
+		override, err := LoadOverride(overrideKey)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("loading override %q: %w", overrideKey, err)
+		}
+		result = Merge(result, override)
+	}
+
+	return result, nil
+}
+
+// DiscoverTargets finds all managed .claude/settings.json locations in the workspace.
+// Returns Target structs with path, override key, rig, and role information.
+func DiscoverTargets(townRoot string) ([]Target, error) {
+	var targets []Target
+
+	// Town-level targets
+	targets = append(targets, Target{
+		Path: filepath.Join(townRoot, "mayor", ".claude", "settings.json"),
+		Key:  "mayor",
+		Role: "mayor",
+	})
+	targets = append(targets, Target{
+		Path: filepath.Join(townRoot, "deacon", ".claude", "settings.json"),
+		Key:  "deacon",
+		Role: "deacon",
+	})
+
+	// Scan rigs
+	entries, err := os.ReadDir(townRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == "mayor" || entry.Name() == "deacon" ||
+			entry.Name() == ".beads" || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+
+		rigName := entry.Name()
+		rigPath := filepath.Join(townRoot, rigName)
+
+		// Skip directories that aren't rigs (no crew/ or witness/ or polecats/ subdirs)
+		if !isRig(rigPath) {
+			continue
+		}
+
+		// Rig-level
+		targets = append(targets, Target{
+			Path: filepath.Join(rigPath, ".claude", "settings.json"),
+			Key:  rigName + "/rig",
+			Rig:  rigName,
+			Role: "rig",
+		})
+
+		// Crew-level
+		crewDir := filepath.Join(rigPath, "crew")
+		if info, err := os.Stat(crewDir); err == nil && info.IsDir() {
+			targets = append(targets, Target{
+				Path: filepath.Join(crewDir, ".claude", "settings.json"),
+				Key:  rigName + "/crew",
+				Rig:  rigName,
+				Role: "crew",
+			})
+
+			// Individual crew members
+			if members, err := os.ReadDir(crewDir); err == nil {
+				for _, m := range members {
+					if m.IsDir() && !strings.HasPrefix(m.Name(), ".") {
+						targets = append(targets, Target{
+							Path: filepath.Join(crewDir, m.Name(), ".claude", "settings.json"),
+							Key:  rigName + "/crew",
+							Rig:  rigName,
+							Role: "crew",
+						})
+					}
+				}
+			}
+		}
+
+		// Polecats-level
+		polecatsDir := filepath.Join(rigPath, "polecats")
+		if info, err := os.Stat(polecatsDir); err == nil && info.IsDir() {
+			targets = append(targets, Target{
+				Path: filepath.Join(polecatsDir, ".claude", "settings.json"),
+				Key:  rigName + "/polecats",
+				Rig:  rigName,
+				Role: "polecats",
+			})
+
+			// Individual polecats
+			if polecats, err := os.ReadDir(polecatsDir); err == nil {
+				for _, p := range polecats {
+					if p.IsDir() && !strings.HasPrefix(p.Name(), ".") {
+						targets = append(targets, Target{
+							Path: filepath.Join(polecatsDir, p.Name(), ".claude", "settings.json"),
+							Key:  rigName + "/polecats",
+							Rig:  rigName,
+							Role: "polecats",
+						})
+					}
+				}
+			}
+		}
+
+		// Witness
+		witnessDir := filepath.Join(rigPath, "witness")
+		if info, err := os.Stat(witnessDir); err == nil && info.IsDir() {
+			targets = append(targets, Target{
+				Path: filepath.Join(witnessDir, ".claude", "settings.json"),
+				Key:  rigName + "/witness",
+				Rig:  rigName,
+				Role: "witness",
+			})
+		}
+
+		// Refinery
+		refineryDir := filepath.Join(rigPath, "refinery")
+		if info, err := os.Stat(refineryDir); err == nil && info.IsDir() {
+			targets = append(targets, Target{
+				Path: filepath.Join(refineryDir, ".claude", "settings.json"),
+				Key:  rigName + "/refinery",
+				Rig:  rigName,
+				Role: "refinery",
+			})
+		}
+	}
+
+	return targets, nil
+}
+
+// isRig checks if a directory looks like a rig (has crew/, witness/, or polecats/ subdirectory).
+func isRig(path string) bool {
+	for _, sub := range []string{"crew", "witness", "polecats", "refinery"} {
+		info, err := os.Stat(filepath.Join(path, sub))
+		if err == nil && info.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
+// EventTypes returns the known hook event type names in display order.
+var EventTypes = []string{"PreToolUse", "PostToolUse", "SessionStart", "Stop", "PreCompact", "UserPromptSubmit"}
+
+// GetEntries returns the hook entries for a given event type.
+func (c *HooksConfig) GetEntries(eventType string) []HookEntry {
+	switch eventType {
+	case "PreToolUse":
+		return c.PreToolUse
+	case "PostToolUse":
+		return c.PostToolUse
+	case "SessionStart":
+		return c.SessionStart
+	case "Stop":
+		return c.Stop
+	case "PreCompact":
+		return c.PreCompact
+	case "UserPromptSubmit":
+		return c.UserPromptSubmit
+	default:
+		return nil
+	}
+}
+
+// SetEntries sets the hook entries for a given event type.
+func (c *HooksConfig) SetEntries(eventType string, entries []HookEntry) {
+	switch eventType {
+	case "PreToolUse":
+		c.PreToolUse = entries
+	case "PostToolUse":
+		c.PostToolUse = entries
+	case "SessionStart":
+		c.SessionStart = entries
+	case "Stop":
+		c.Stop = entries
+	case "PreCompact":
+		c.PreCompact = entries
+	case "UserPromptSubmit":
+		c.UserPromptSubmit = entries
+	}
+}
+
+// ToMap converts HooksConfig to a map for iteration over non-empty event types.
+func (c *HooksConfig) ToMap() map[string][]HookEntry {
+	m := make(map[string][]HookEntry)
+	for _, et := range EventTypes {
+		entries := c.GetEntries(et)
+		if len(entries) > 0 {
+			m[et] = entries
+		}
+	}
+	return m
+}
+
+// AddEntry appends a hook entry to the given event type if the matcher doesn't already exist.
+// Returns true if the entry was added.
+func (c *HooksConfig) AddEntry(eventType string, entry HookEntry) bool {
+	entries := c.GetEntries(eventType)
+	for _, e := range entries {
+		if e.Matcher == entry.Matcher {
+			return false
+		}
+	}
+	c.SetEntries(eventType, append(entries, entry))
+	return true
 }
 
 // gtDir returns the ~/.gt directory path.
@@ -195,344 +580,6 @@ func GetApplicableOverrides(target string) []string {
 	}
 	// Simple role target
 	return []string{target}
-}
-
-// Merge merges an override config into a base config using per-matcher merging.
-// For each hook type present in the override:
-//   - Same matcher: override replaces the base entry entirely
-//   - Different matcher: both entries are included (base first, then override)
-//   - Empty hooks list on a matcher: removes that entry (explicit disable)
-//
-// Hook types not present in the override are preserved from the base.
-func Merge(base, override *HooksConfig) *HooksConfig {
-	result := copyConfig(base)
-
-	for _, eventType := range EventTypes {
-		overrideEntries := override.GetEntries(eventType)
-		if len(overrideEntries) == 0 {
-			continue
-		}
-
-		baseEntries := result.GetEntries(eventType)
-		if baseEntries == nil {
-			baseEntries = []HookEntry{}
-		}
-
-		for _, oe := range overrideEntries {
-			replaced := false
-			for i, be := range baseEntries {
-				if be.Matcher == oe.Matcher {
-					replaced = true
-					if len(oe.Hooks) == 0 {
-						// Explicit disable: remove this entry
-						baseEntries = append(baseEntries[:i], baseEntries[i+1:]...)
-					} else {
-						baseEntries[i] = oe
-					}
-					break
-				}
-			}
-			if !replaced && len(oe.Hooks) > 0 {
-				baseEntries = append(baseEntries, oe)
-			}
-		}
-
-		result.SetEntries(eventType, baseEntries)
-	}
-
-	return result
-}
-
-// copyConfig creates a deep copy of a HooksConfig.
-func copyConfig(c *HooksConfig) *HooksConfig {
-	if c == nil {
-		return &HooksConfig{}
-	}
-	result := &HooksConfig{}
-	for _, eventType := range EventTypes {
-		entries := c.GetEntries(eventType)
-		if entries == nil {
-			continue
-		}
-		copied := make([]HookEntry, len(entries))
-		for i, e := range entries {
-			copied[i] = HookEntry{
-				Matcher: e.Matcher,
-				Hooks:   make([]Hook, len(e.Hooks)),
-			}
-			copy(copied[i].Hooks, e.Hooks)
-		}
-		result.SetEntries(eventType, copied)
-	}
-	return result
-}
-
-// ComputeExpected computes the expected HooksConfig for a target by loading
-// the base config and applying all applicable overrides in order of specificity.
-// If no base config exists, uses DefaultBase().
-func ComputeExpected(target string) (*HooksConfig, error) {
-	base, err := LoadBase()
-	if err != nil {
-		if os.IsNotExist(err) {
-			base = DefaultBase()
-		} else {
-			return nil, fmt.Errorf("loading base config: %w", err)
-		}
-	}
-
-	result := base
-	for _, overrideKey := range GetApplicableOverrides(target) {
-		override, err := LoadOverride(overrideKey)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return nil, fmt.Errorf("loading override %q: %w", overrideKey, err)
-		}
-		result = Merge(result, override)
-	}
-
-	return result, nil
-}
-
-// LoadSettings loads a Claude Code settings.json file.
-// Returns a zero-value SettingsJSON if the file doesn't exist.
-func LoadSettings(path string) (*SettingsJSON, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return &SettingsJSON{}, nil
-		}
-		return nil, err
-	}
-
-	var settings SettingsJSON
-	if err := json.Unmarshal(data, &settings); err != nil {
-		return nil, fmt.Errorf("parsing %s: %w", path, err)
-	}
-
-	return &settings, nil
-}
-
-// HooksEqual returns true if two HooksConfigs are structurally equal.
-// Compares by serializing to JSON for reliable deep equality.
-func HooksEqual(a, b *HooksConfig) bool {
-	aj, err := json.Marshal(a)
-	if err != nil {
-		return false
-	}
-	bj, err := json.Marshal(b)
-	if err != nil {
-		return false
-	}
-	return string(aj) == string(bj)
-}
-
-// DiscoverTargets finds all managed .claude/settings.json locations in the workspace.
-// Returns Target structs with path, override key, rig, and role information.
-func DiscoverTargets(townRoot string) ([]Target, error) {
-	var targets []Target
-
-	// Town-level targets
-	targets = append(targets, Target{
-		Path: filepath.Join(townRoot, "mayor", ".claude", "settings.json"),
-		Key:  "mayor",
-		Role: "mayor",
-	})
-	targets = append(targets, Target{
-		Path: filepath.Join(townRoot, "deacon", ".claude", "settings.json"),
-		Key:  "deacon",
-		Role: "deacon",
-	})
-
-	// Scan rigs
-	entries, err := os.ReadDir(townRoot)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() || entry.Name() == "mayor" || entry.Name() == "deacon" ||
-			entry.Name() == ".beads" || strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-
-		rigName := entry.Name()
-		rigPath := filepath.Join(townRoot, rigName)
-
-		// Skip directories that aren't rigs (no crew/ or witness/ or polecats/ subdirs)
-		if !isRig(rigPath) {
-			continue
-		}
-
-		// Rig-level
-		targets = append(targets, Target{
-			Path: filepath.Join(rigPath, ".claude", "settings.json"),
-			Key:  rigName + "/rig",
-			Rig:  rigName,
-			Role: "rig",
-		})
-
-		// Crew-level
-		crewDir := filepath.Join(rigPath, "crew")
-		if info, err := os.Stat(crewDir); err == nil && info.IsDir() {
-			targets = append(targets, Target{
-				Path: filepath.Join(crewDir, ".claude", "settings.json"),
-				Key:  rigName + "/crew",
-				Rig:  rigName,
-				Role: "crew",
-			})
-
-			// Individual crew members
-			if members, err := os.ReadDir(crewDir); err == nil {
-				for _, m := range members {
-					if m.IsDir() && !strings.HasPrefix(m.Name(), ".") {
-						targets = append(targets, Target{
-							Path: filepath.Join(crewDir, m.Name(), ".claude", "settings.json"),
-							Key:  rigName + "/crew",
-							Rig:  rigName,
-							Role: "crew",
-						})
-					}
-				}
-			}
-		}
-
-		// Polecats-level
-		polecatsDir := filepath.Join(rigPath, "polecats")
-		if info, err := os.Stat(polecatsDir); err == nil && info.IsDir() {
-			targets = append(targets, Target{
-				Path: filepath.Join(polecatsDir, ".claude", "settings.json"),
-				Key:  rigName + "/polecats",
-				Rig:  rigName,
-				Role: "polecats",
-			})
-
-			// Individual polecats
-			if polecats, err := os.ReadDir(polecatsDir); err == nil {
-				for _, p := range polecats {
-					if p.IsDir() && !strings.HasPrefix(p.Name(), ".") {
-						targets = append(targets, Target{
-							Path: filepath.Join(polecatsDir, p.Name(), ".claude", "settings.json"),
-							Key:  rigName + "/polecats",
-							Rig:  rigName,
-							Role: "polecats",
-						})
-					}
-				}
-			}
-		}
-
-		// Witness
-		witnessDir := filepath.Join(rigPath, "witness")
-		if info, err := os.Stat(witnessDir); err == nil && info.IsDir() {
-			targets = append(targets, Target{
-				Path: filepath.Join(witnessDir, ".claude", "settings.json"),
-				Key:  rigName + "/witness",
-				Rig:  rigName,
-				Role: "witness",
-			})
-		}
-
-		// Refinery
-		refineryDir := filepath.Join(rigPath, "refinery")
-		if info, err := os.Stat(refineryDir); err == nil && info.IsDir() {
-			targets = append(targets, Target{
-				Path: filepath.Join(refineryDir, ".claude", "settings.json"),
-				Key:  rigName + "/refinery",
-				Rig:  rigName,
-				Role: "refinery",
-			})
-		}
-	}
-
-	return targets, nil
-}
-
-// isRig checks if a directory looks like a rig (has crew/, witness/, or polecats/ subdirectory).
-func isRig(path string) bool {
-	for _, sub := range []string{"crew", "witness", "polecats", "refinery"} {
-		info, err := os.Stat(filepath.Join(path, sub))
-		if err == nil && info.IsDir() {
-			return true
-		}
-	}
-	return false
-}
-
-// DisplayKey returns a human-readable label for the target.
-// For targets with a rig, shows "rig/role"; for town-level targets, shows the role.
-func (t Target) DisplayKey() string {
-	if t.Rig != "" {
-		return t.Rig + "/" + t.Role
-	}
-	return t.Role
-}
-
-// EventTypes returns the known hook event type names in display order.
-var EventTypes = []string{"PreToolUse", "PostToolUse", "SessionStart", "Stop", "PreCompact", "UserPromptSubmit"}
-
-// GetEntries returns the hook entries for a given event type.
-func (c *HooksConfig) GetEntries(eventType string) []HookEntry {
-	switch eventType {
-	case "PreToolUse":
-		return c.PreToolUse
-	case "PostToolUse":
-		return c.PostToolUse
-	case "SessionStart":
-		return c.SessionStart
-	case "Stop":
-		return c.Stop
-	case "PreCompact":
-		return c.PreCompact
-	case "UserPromptSubmit":
-		return c.UserPromptSubmit
-	default:
-		return nil
-	}
-}
-
-// SetEntries sets the hook entries for a given event type.
-func (c *HooksConfig) SetEntries(eventType string, entries []HookEntry) {
-	switch eventType {
-	case "PreToolUse":
-		c.PreToolUse = entries
-	case "PostToolUse":
-		c.PostToolUse = entries
-	case "SessionStart":
-		c.SessionStart = entries
-	case "Stop":
-		c.Stop = entries
-	case "PreCompact":
-		c.PreCompact = entries
-	case "UserPromptSubmit":
-		c.UserPromptSubmit = entries
-	}
-}
-
-// ToMap converts HooksConfig to a map for iteration over non-empty event types.
-func (c *HooksConfig) ToMap() map[string][]HookEntry {
-	m := make(map[string][]HookEntry)
-	for _, et := range EventTypes {
-		entries := c.GetEntries(et)
-		if len(entries) > 0 {
-			m[et] = entries
-		}
-	}
-	return m
-}
-
-// AddEntry appends a hook entry to the given event type if the matcher doesn't already exist.
-// Returns true if the entry was added.
-func (c *HooksConfig) AddEntry(eventType string, entry HookEntry) bool {
-	entries := c.GetEntries(eventType)
-	for _, e := range entries {
-		if e.Matcher == entry.Matcher {
-			return false
-		}
-	}
-	c.SetEntries(eventType, append(entries, entry))
-	return true
 }
 
 // loadConfig loads a HooksConfig from a JSON file.

@@ -8,11 +8,8 @@ import (
 )
 
 func TestLoadSaveBase(t *testing.T) {
-	// Override gtDir for testing
 	tmpDir := t.TempDir()
-	origHome := os.Getenv("HOME")
 	t.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
 
 	cfg := DefaultBase()
 
@@ -20,7 +17,6 @@ func TestLoadSaveBase(t *testing.T) {
 		t.Fatalf("SaveBase failed: %v", err)
 	}
 
-	// Verify file was created
 	if _, err := os.Stat(BasePath()); err != nil {
 		t.Fatalf("base config file not created: %v", err)
 	}
@@ -88,7 +84,6 @@ func TestLoadSaveOverrideRigRole(t *testing.T) {
 		t.Fatalf("SaveOverride failed: %v", err)
 	}
 
-	// Verify the file path uses __ separator
 	expectedPath := filepath.Join(tmpDir, ".gt", "hooks-overrides", "gastown__crew.json")
 	if _, err := os.Stat(expectedPath); err != nil {
 		t.Fatalf("expected override file at %s: %v", expectedPath, err)
@@ -194,11 +189,10 @@ func TestDefaultBase(t *testing.T) {
 		t.Error("DefaultBase should have Stop hooks")
 	}
 
-	// Verify gt prime is in SessionStart
 	found := false
 	for _, entry := range cfg.SessionStart {
 		for _, h := range entry.Hooks {
-			if h.Command != "" && len(h.Command) > 0 {
+			if h.Command != "" {
 				found = true
 			}
 		}
@@ -229,22 +223,15 @@ func TestMerge(t *testing.T) {
 
 	result := Merge(base, override)
 
-	// SessionStart should be replaced by override
 	if len(result.SessionStart) != 1 || result.SessionStart[0].Hooks[0].Command != "override-session" {
 		t.Errorf("expected override SessionStart, got %v", result.SessionStart)
 	}
-
-	// Stop should be preserved from base (not in override)
 	if len(result.Stop) != 1 || result.Stop[0].Hooks[0].Command != "base-stop" {
 		t.Errorf("expected base Stop, got %v", result.Stop)
 	}
-
-	// PreToolUse should come from override
 	if len(result.PreToolUse) != 1 || result.PreToolUse[0].Matcher != "Bash(git*)" {
 		t.Errorf("expected override PreToolUse, got %v", result.PreToolUse)
 	}
-
-	// Original base should not be mutated
 	if len(base.PreToolUse) != 0 {
 		t.Error("Merge mutated the original base config")
 	}
@@ -343,7 +330,6 @@ func TestMergeEmptyOverride(t *testing.T) {
 
 	result := Merge(base, override)
 
-	// Everything should be preserved from base
 	if !HooksEqual(base, result) {
 		t.Error("empty override should not change base config")
 	}
@@ -353,7 +339,6 @@ func TestComputeExpected(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 
-	// Save a base config
 	base := &HooksConfig{
 		SessionStart: []HookEntry{
 			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "base-cmd"}}},
@@ -363,7 +348,6 @@ func TestComputeExpected(t *testing.T) {
 		t.Fatalf("SaveBase failed: %v", err)
 	}
 
-	// Save a crew override
 	crewOverride := &HooksConfig{
 		PreToolUse: []HookEntry{
 			{Matcher: "Bash(git*)", Hooks: []Hook{{Type: "command", Command: "crew-guard"}}},
@@ -373,7 +357,6 @@ func TestComputeExpected(t *testing.T) {
 		t.Fatalf("SaveOverride crew failed: %v", err)
 	}
 
-	// Save a gastown/crew override
 	gcOverride := &HooksConfig{
 		SessionStart: []HookEntry{
 			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "gastown-crew-session"}}},
@@ -383,18 +366,14 @@ func TestComputeExpected(t *testing.T) {
 		t.Fatalf("SaveOverride gastown/crew failed: %v", err)
 	}
 
-	// Compute expected for gastown/crew (should apply: base → crew → gastown/crew)
 	expected, err := ComputeExpected("gastown/crew")
 	if err != nil {
 		t.Fatalf("ComputeExpected failed: %v", err)
 	}
 
-	// SessionStart should come from gastown/crew override (most specific)
 	if len(expected.SessionStart) != 1 || expected.SessionStart[0].Hooks[0].Command != "gastown-crew-session" {
 		t.Errorf("expected gastown/crew SessionStart, got %v", expected.SessionStart)
 	}
-
-	// PreToolUse should come from crew override
 	if len(expected.PreToolUse) != 1 || expected.PreToolUse[0].Hooks[0].Command != "crew-guard" {
 		t.Errorf("expected crew PreToolUse, got %v", expected.PreToolUse)
 	}
@@ -404,7 +383,6 @@ func TestComputeExpectedNoBase(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 
-	// No base config, no overrides - should fall back to DefaultBase
 	expected, err := ComputeExpected("mayor")
 	if err != nil {
 		t.Fatalf("ComputeExpected failed: %v", err)
@@ -447,18 +425,17 @@ func TestHooksEqual(t *testing.T) {
 func TestLoadSettings(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Test loading existing file
-	settings := SettingsJSON{
-		EditorMode: "vim",
-		Hooks: HooksConfig{
-			SessionStart: []HookEntry{
-				{Matcher: "", Hooks: []Hook{{Type: "command", Command: "test"}}},
-			},
-		},
-	}
-	data, _ := json.Marshal(settings)
+	// Write raw JSON to test LoadSettings (SettingsJSON uses json:"-" tags)
+	settingsJSON := `{
+  "editorMode": "vim",
+  "hooks": {
+    "SessionStart": [
+      {"matcher": "", "hooks": [{"type": "command", "command": "test"}]}
+    ]
+  }
+}`
 	path := filepath.Join(tmpDir, "settings.json")
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(path, []byte(settingsJSON), 0644); err != nil {
 		t.Fatalf("failed to write: %v", err)
 	}
 
@@ -486,15 +463,8 @@ func TestLoadSettings(t *testing.T) {
 func TestDiscoverTargets(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Create a minimal workspace structure
-	// mayor/town.json (workspace marker)
 	os.MkdirAll(filepath.Join(tmpDir, "mayor"), 0755)
-	os.WriteFile(filepath.Join(tmpDir, "mayor", "town.json"), []byte(`{"name":"test"}`), 0644)
-
-	// deacon directory
 	os.MkdirAll(filepath.Join(tmpDir, "deacon"), 0755)
-
-	// rig with crew and witness
 	os.MkdirAll(filepath.Join(tmpDir, "testrig", "crew", "alice"), 0755)
 	os.MkdirAll(filepath.Join(tmpDir, "testrig", "crew", "bob"), 0755)
 	os.MkdirAll(filepath.Join(tmpDir, "testrig", "witness"), 0755)
@@ -504,7 +474,6 @@ func TestDiscoverTargets(t *testing.T) {
 		t.Fatalf("DiscoverTargets failed: %v", err)
 	}
 
-	// Should find: mayor, deacon, testrig/rig, testrig/crew, testrig/crew (alice), testrig/crew (bob), testrig/witness
 	if len(targets) < 5 {
 		t.Errorf("expected at least 5 targets, got %d", len(targets))
 		for _, tgt := range targets {
@@ -512,7 +481,6 @@ func TestDiscoverTargets(t *testing.T) {
 		}
 	}
 
-	// Verify specific targets exist
 	found := make(map[string]bool)
 	for _, tgt := range targets {
 		found[tgt.DisplayKey()] = true
@@ -549,25 +517,21 @@ func TestGetSetEntries(t *testing.T) {
 		},
 	}
 
-	// GetEntries for existing type
 	entries := cfg.GetEntries("SessionStart")
 	if len(entries) != 1 {
 		t.Errorf("expected 1 SessionStart entry, got %d", len(entries))
 	}
 
-	// GetEntries for empty type
 	entries = cfg.GetEntries("PreToolUse")
 	if len(entries) != 0 {
 		t.Errorf("expected 0 PreToolUse entries, got %d", len(entries))
 	}
 
-	// GetEntries for unknown type
 	entries = cfg.GetEntries("Unknown")
 	if entries != nil {
 		t.Errorf("expected nil for unknown event type, got %v", entries)
 	}
 
-	// SetEntries
 	cfg.SetEntries("PreToolUse", []HookEntry{
 		{Matcher: "Bash(*)", Hooks: []Hook{{Type: "command", Command: "guard"}}},
 	})
@@ -604,7 +568,6 @@ func TestToMap(t *testing.T) {
 func TestAddEntry(t *testing.T) {
 	cfg := &HooksConfig{}
 
-	// Add first entry
 	added := cfg.AddEntry("PreToolUse", HookEntry{
 		Matcher: "Bash(git*)",
 		Hooks:   []Hook{{Type: "command", Command: "guard"}},
@@ -616,7 +579,6 @@ func TestAddEntry(t *testing.T) {
 		t.Errorf("expected 1 PreToolUse entry, got %d", len(cfg.PreToolUse))
 	}
 
-	// Try adding duplicate matcher - should not add
 	added = cfg.AddEntry("PreToolUse", HookEntry{
 		Matcher: "Bash(git*)",
 		Hooks:   []Hook{{Type: "command", Command: "different"}},
@@ -628,7 +590,6 @@ func TestAddEntry(t *testing.T) {
 		t.Errorf("expected still 1 PreToolUse entry, got %d", len(cfg.PreToolUse))
 	}
 
-	// Add different matcher - should add
 	added = cfg.AddEntry("PreToolUse", HookEntry{
 		Matcher: "Bash(rm*)",
 		Hooks:   []Hook{{Type: "command", Command: "block"}},
@@ -653,12 +614,10 @@ func TestMarshalConfig(t *testing.T) {
 		t.Fatalf("MarshalConfig failed: %v", err)
 	}
 
-	// Should be pretty-printed
 	if len(data) == 0 {
 		t.Error("MarshalConfig returned empty data")
 	}
 
-	// Should be valid JSON that round-trips
 	loaded := &HooksConfig{}
 	if err := json.Unmarshal(data, loaded); err != nil {
 		t.Fatalf("round-trip failed: %v", err)

@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,7 +22,7 @@ For each target (mayor, deacon, rig/crew, rig/witness, etc.):
 1. Load base config
 2. Apply role override (if exists)
 3. Apply rig+role override (if exists)
-4. Merge hooks section into existing settings.json (preserving non-hooks fields)
+4. Merge hooks section into existing settings.json (preserving all fields)
 5. Write updated settings.json
 
 Examples:
@@ -121,7 +120,7 @@ const (
 )
 
 // syncTarget syncs a single target's .claude/settings.json.
-// If dryRun is true, checks what would change without writing.
+// Uses MarshalSettings/UnmarshalSettings to preserve unknown fields.
 func syncTarget(target hooks.Target, dryRun bool) (syncResult, error) {
 	// Compute expected hooks for this target
 	expected, err := hooks.ComputeExpected(target.Key)
@@ -151,7 +150,7 @@ func syncTarget(target hooks.Target, dryRun bool) (syncResult, error) {
 		return syncCreated, nil
 	}
 
-	// Update hooks section, preserving other fields
+	// Update hooks section, preserving all other fields (including unknown ones)
 	current.Hooks = *expected
 
 	// Ensure enabledPlugins map exists with beads disabled (Gas Town standard)
@@ -166,8 +165,8 @@ func syncTarget(target hooks.Target, dryRun bool) (syncResult, error) {
 		return 0, fmt.Errorf("creating .claude directory: %w", err)
 	}
 
-	// Write settings.json
-	data, err := json.MarshalIndent(current, "", "  ")
+	// Write settings.json using MarshalSettings to preserve unknown fields
+	data, err := hooks.MarshalSettings(current)
 	if err != nil {
 		return 0, fmt.Errorf("marshaling settings: %w", err)
 	}
