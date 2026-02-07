@@ -273,6 +273,8 @@ var (
 	rigResetRole       string
 	rigShutdownForce   bool
 	rigShutdownNuclear bool
+	rigRebootForce     bool
+	rigRebootNuclear   bool
 	rigStopForce       bool
 	rigStopNuclear     bool
 	rigRestartForce    bool
@@ -309,7 +311,8 @@ func init() {
 	rigShutdownCmd.Flags().BoolVarP(&rigShutdownForce, "force", "f", false, "Force immediate shutdown")
 	rigShutdownCmd.Flags().BoolVar(&rigShutdownNuclear, "nuclear", false, "DANGER: Bypass ALL safety checks (loses uncommitted work!)")
 
-	rigRebootCmd.Flags().BoolVarP(&rigShutdownForce, "force", "f", false, "Force immediate shutdown during reboot")
+	rigRebootCmd.Flags().BoolVarP(&rigRebootForce, "force", "f", false, "Force immediate shutdown during reboot")
+	rigRebootCmd.Flags().BoolVar(&rigRebootNuclear, "nuclear", false, "DANGER: Bypass ALL safety checks during reboot (loses uncommitted work!)")
 
 	rigStopCmd.Flags().BoolVarP(&rigStopForce, "force", "f", false, "Force immediate shutdown")
 	rigStopCmd.Flags().BoolVar(&rigStopNuclear, "nuclear", false, "DANGER: Bypass ALL safety checks (loses uncommitted work!)")
@@ -1131,6 +1134,10 @@ func runRigReboot(cmd *cobra.Command, args []string) error {
 	rigName := args[0]
 
 	fmt.Printf("Rebooting rig %s...\n\n", style.Bold.Render(rigName))
+
+	// Propagate reboot flags to shutdown globals
+	rigShutdownForce = rigRebootForce
+	rigShutdownNuclear = rigRebootNuclear
 
 	// Shutdown first
 	if err := runRigShutdown(cmd, args); err != nil {
