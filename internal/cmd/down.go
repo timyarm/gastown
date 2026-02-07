@@ -434,53 +434,54 @@ func verifyShutdown(t *tmux.Tmux, townRoot string) []string {
 // findOrphanedClaudeProcesses finds Claude/node processes that are running in the
 // town directory but aren't associated with any active tmux session.
 // This can happen when tmux sessions are killed but child processes don't terminate.
+//
+// Only matches processes whose full command line references the town root path,
+// which avoids false positives on unrelated Node.js applications (VS Code
+// extensions, web servers, etc.).
 func findOrphanedClaudeProcesses(townRoot string) []int {
-	// Use pgrep to find all claude/node processes
-	cmd := exec.Command("pgrep", "-l", "node")
-	output, err := cmd.Output()
+	// Use ps to get PID, process name, and full command line in a single pass.
+	// Previous implementation used "pgrep -l node" which matched ALL node
+	// processes on the system regardless of whether they belonged to Gas Town.
+	out, err := exec.Command("ps", "-eo", "pid,comm,args").Output()
 	if err != nil {
-		return nil // pgrep found no processes or failed
+		return nil
 	}
 
 	var orphaned []int
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
+	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		// Format: "PID command"
-		parts := strings.Fields(line)
-		if len(parts) < 2 {
-			continue
-		}
-		pidStr := parts[0]
-		var pid int
-		if _, err := fmt.Sscanf(pidStr, "%d", &pid); err != nil {
+
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
 			continue
 		}
 
-		// Check if this process is running in the town directory
-		if isProcessInTown(pid, townRoot) {
+		var pid int
+		if _, err := fmt.Sscanf(fields[0], "%d", &pid); err != nil {
+			continue
+		}
+
+		// Only consider known Gas Town process names
+		comm := strings.ToLower(fields[1])
+		switch comm {
+		case "claude", "claude-code", "codex", "node":
+			// Potential Gas Town process
+		default:
+			continue
+		}
+
+		// Verify the process's command line references the town root.
+		// This filters out unrelated node processes (VS Code, web servers, etc.)
+		// whose command lines won't contain the Gas Town directory path.
+		args := strings.Join(fields[2:], " ")
+		if strings.Contains(args, townRoot) {
 			orphaned = append(orphaned, pid)
 		}
 	}
 
 	return orphaned
-}
-
-// isProcessInTown checks if a process is running in the given town directory.
-// Uses ps to check the process's working directory.
-func isProcessInTown(pid int, townRoot string) bool {
-	// Use ps to get the process's working directory
-	cmd := exec.Command("ps", "-o", "command=", "-p", fmt.Sprintf("%d", pid))
-	output, err := cmd.Output()
-	if err != nil {
-		return false
-	}
-
-	// Check if the command line includes the town path
-	command := string(output)
-	return strings.Contains(command, townRoot)
 }
 
