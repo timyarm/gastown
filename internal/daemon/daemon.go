@@ -58,6 +58,11 @@ type Daemon struct {
 	// See: https://github.com/steveyegge/gastown/issues/567
 	// Note: Only accessed from heartbeat loop goroutine - no sync needed.
 	deaconLastStarted time.Time
+
+	// syncFailures tracks consecutive git pull failures per workdir.
+	// Used to escalate logging from WARN to ERROR after repeated failures.
+	// Only accessed from heartbeat loop goroutine - no sync needed.
+	syncFailures map[string]int
 }
 
 // sessionDeath records a detected session death for mass death analysis.

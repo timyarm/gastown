@@ -848,7 +848,7 @@ func RepairWorkspace(townRoot string, ws BrokenWorkspace) (string, error) {
 	}
 
 	// No local data — create a fresh database
-	if err := InitRig(townRoot, ws.ConfiguredDB); err != nil {
+	if _, err := InitRig(townRoot, ws.ConfiguredDB); err != nil {
 		return "", fmt.Errorf("creating database for %s: %w", ws.RigName, err)
 	}
 	return "created new database", nil

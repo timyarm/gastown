@@ -554,8 +554,13 @@ func (d *Daemon) applySessionTheme(sessionName string, parsed *ParsedIdentity) {
 	}
 }
 
+// syncFailureEscalationThreshold is the number of consecutive pull failures
+// before logging escalates from WARN to ERROR.
+const syncFailureEscalationThreshold = 3
+
 // syncWorkspace syncs a git workspace before starting a new session.
 // This ensures agents with persistent clones (like refinery) start with current code.
+// Handles dirty working trees by auto-stashing before pull and restoring after.
 func (d *Daemon) syncWorkspace(workDir string) {
 	// Determine default branch from rig config
 	// workDir is like <townRoot>/<rigName>/<role>/rig or <townRoot>/<rigName>/crew/<name>
@@ -591,6 +596,29 @@ func (d *Daemon) syncWorkspace(workDir string) {
 	// Reset stderr buffer
 	stderr.Reset()
 
+	// Check if working tree is dirty before attempting pull.
+	// "git pull --rebase" fails with "cannot pull with rebase: You have unstaged changes"
+	// on dirty trees, so we auto-stash first and restore after.
+	stashed := false
+	if d.isWorkingTreeDirty(workDir) {
+		d.logger.Printf("Warning: dirty working tree in %s, auto-stashing before pull", workDir)
+		stashCmd := exec.Command("git", "stash", "push", "-u", "-m", "daemon-auto-stash: pre-sync")
+		stashCmd.Dir = workDir
+		stashCmd.Stderr = &stderr
+		stashCmd.Env = os.Environ()
+		if err := stashCmd.Run(); err != nil {
+			errMsg := strings.TrimSpace(stderr.String())
+			if errMsg == "" {
+				errMsg = err.Error()
+			}
+			d.logger.Printf("Warning: git stash failed in %s: %s, skipping pull", workDir, errMsg)
+			d.recordSyncFailure(workDir)
+			return
+		}
+		stashed = true
+		stderr.Reset()
+	}
+
 	// Pull with rebase to incorporate changes
 	pullCmd := exec.Command("git", "pull", "--rebase", "origin", defaultBranch)
 	pullCmd.Dir = workDir
@@ -601,11 +629,73 @@ func (d *Daemon) syncWorkspace(workDir string) {
 		if errMsg == "" {
 			errMsg = err.Error()
 		}
-		d.logger.Printf("Warning: git pull failed in %s: %s (agent may have conflicts)", workDir, errMsg)
-		// Don't fail - agent can handle conflicts
+		d.recordSyncFailure(workDir)
+		failures := d.getSyncFailures(workDir)
+		if failures >= syncFailureEscalationThreshold {
+			d.logger.Printf("Error: git pull repeatedly failing in %s (%d consecutive failures): %s", workDir, failures, errMsg)
+		} else {
+			d.logger.Printf("Warning: git pull failed in %s (%d consecutive failure(s)): %s", workDir, failures, errMsg)
+		}
+	} else {
+		// Pull succeeded - reset failure counter
+		d.resetSyncFailures(workDir)
+	}
+
+	// Restore stashed changes if we stashed them
+	if stashed {
+		stderr.Reset()
+		popCmd := exec.Command("git", "stash", "pop")
+		popCmd.Dir = workDir
+		popCmd.Stderr = &stderr
+		popCmd.Env = os.Environ()
+		if err := popCmd.Run(); err != nil {
+			errMsg := strings.TrimSpace(stderr.String())
+			if errMsg == "" {
+				errMsg = err.Error()
+			}
+			d.logger.Printf("Warning: git stash pop failed in %s: %s (stashed changes preserved in stash list)", workDir, errMsg)
+		}
 	}
 
 	// Note: With Dolt backend, beads changes are persisted immediately - no sync needed
+}
+
+// isWorkingTreeDirty checks if a git working tree has uncommitted changes.
+func (d *Daemon) isWorkingTreeDirty(workDir string) bool {
+	// "git status --porcelain" outputs nothing if clean
+	cmd := exec.Command("git", "status", "--porcelain")
+	cmd.Dir = workDir
+	cmd.Env = os.Environ()
+	output, err := cmd.Output()
+	if err != nil {
+		// If we can't check, assume dirty to be safe
+		return true
+	}
+	return len(strings.TrimSpace(string(output))) > 0
+}
+
+// recordSyncFailure increments the consecutive failure counter for a workdir.
+func (d *Daemon) recordSyncFailure(workDir string) {
+	if d.syncFailures == nil {
+		d.syncFailures = make(map[string]int)
+	}
+	d.syncFailures[workDir]++
+}
+
+// getSyncFailures returns the consecutive failure count for a workdir.
+func (d *Daemon) getSyncFailures(workDir string) int {
+	if d.syncFailures == nil {
+		return 0
+	}
+	return d.syncFailures[workDir]
+}
+
+// resetSyncFailures clears the failure counter for a workdir after a successful sync.
+func (d *Daemon) resetSyncFailures(workDir string) {
+	if d.syncFailures == nil {
+		return
+	}
+	delete(d.syncFailures, workDir)
 }
 
 // closeMessage removes a lifecycle mail message after processing.
