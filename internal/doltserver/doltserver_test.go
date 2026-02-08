@@ -1525,7 +1525,7 @@ func TestEnsureMetadata_SetsDefaultJSONLExport(t *testing.T) {
 
 func TestInitRig_EmptyName(t *testing.T) {
 	townRoot := t.TempDir()
-	err := InitRig(townRoot, "")
+	_, err := InitRig(townRoot, "")
 	if err == nil {
 		t.Fatal("expected error for empty rig name")
 	}
@@ -1534,7 +1534,7 @@ func TestInitRig_EmptyName(t *testing.T) {
 func TestInitRig_InvalidCharacters(t *testing.T) {
 	townRoot := t.TempDir()
 	for _, name := range []string{"my rig", "rig/name", "rig.name", "rig@name"} {
-		err := InitRig(townRoot, name)
+		_, err := InitRig(townRoot, name)
 		if err == nil {
 			t.Errorf("expected error for invalid rig name %q", name)
 		}

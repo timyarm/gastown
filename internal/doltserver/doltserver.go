@@ -568,9 +568,12 @@ func ListDatabases(townRoot string) ([]string, error) {
 }
 
 // InitRig initializes a new rig database in the data directory.
-func InitRig(townRoot, rigName string) error {
+// If the Dolt server is running, it executes CREATE DATABASE to register the
+// database with the live server (avoiding the need for a restart).
+// Returns true if the database was registered with a running server.
+func InitRig(townRoot, rigName string) (serverWasRunning bool, err error) {
 	if rigName == "" {
-		return fmt.Errorf("rig name cannot be empty")
+		return false, fmt.Errorf("rig name cannot be empty")
 	}
 
 	config := DefaultConfig(townRoot)
@@ -578,28 +581,39 @@ func InitRig(townRoot, rigName string) error {
 	// Validate rig name (simple alphanumeric + underscore/dash)
 	for _, r := range rigName {
 		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-') {
-			return fmt.Errorf("invalid rig name %q: must contain only alphanumeric, underscore, or dash", rigName)
+			return false, fmt.Errorf("invalid rig name %q: must contain only alphanumeric, underscore, or dash", rigName)
 		}
 	}
 
 	rigDir := filepath.Join(config.DataDir, rigName)
 
-	// Check if already exists
+	// Check if already exists on disk
 	if _, err := os.Stat(filepath.Join(rigDir, ".dolt")); err == nil {
-		return fmt.Errorf("rig database %q already exists at %s", rigName, rigDir)
+		return false, fmt.Errorf("rig database %q already exists at %s", rigName, rigDir)
 	}
 
-	// Create the rig directory
-	if err := os.MkdirAll(rigDir, 0755); err != nil {
-		return fmt.Errorf("creating rig directory: %w", err)
-	}
+	// Check if server is running
+	running, _, _ := IsRunning(townRoot)
 
-	// Initialize Dolt database
-	cmd := exec.Command("dolt", "init")
-	cmd.Dir = rigDir
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("initializing Dolt database: %w\n%s", err, output)
+	if running {
+		// Server is running: use CREATE DATABASE which both creates the
+		// directory and registers the database with the live server.
+		if err := serverExecSQL(townRoot, fmt.Sprintf("CREATE DATABASE `%s`", rigName)); err != nil {
+			return true, fmt.Errorf("creating database on running server: %w", err)
+		}
+	} else {
+		// Server not running: create directory and init manually.
+		// The database will be picked up when the server starts.
+		if err := os.MkdirAll(rigDir, 0755); err != nil {
+			return false, fmt.Errorf("creating rig directory: %w", err)
+		}
+
+		cmd := exec.Command("dolt", "init")
+		cmd.Dir = rigDir
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return false, fmt.Errorf("initializing Dolt database: %w\n%s", err, output)
+		}
 	}
 
 	// Update metadata.json to point to the server
@@ -608,7 +622,7 @@ func InitRig(townRoot, rigName string) error {
 		fmt.Fprintf(os.Stderr, "Warning: database initialized but metadata.json update failed: %v\n", err)
 	}
 
-	return nil
+	return running, nil
 }
 
 // Migration represents a database migration from old to new location.
@@ -1019,6 +1033,22 @@ func moveDir(src, dest string) error {
 	}
 	if err := os.RemoveAll(src); err != nil {
 		return fmt.Errorf("removing source after copy: %w", err)
+	}
+	return nil
+}
+
+// serverExecSQL executes a SQL statement against the Dolt server without targeting
+// a specific database. Used for server-level commands like CREATE DATABASE.
+func serverExecSQL(townRoot, query string) error {
+	config := DefaultConfig(townRoot)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "dolt", "sql", "-q", query)
+	cmd.Dir = config.DataDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w (output: %s)", err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }

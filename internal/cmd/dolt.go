@@ -377,7 +377,8 @@ func runDoltInitRig(cmd *cobra.Command, args []string) error {
 
 	rigName := args[0]
 
-	if err := doltserver.InitRig(townRoot, rigName); err != nil {
+	serverWasRunning, err := doltserver.InitRig(townRoot, rigName)
+	if err != nil {
 		return err
 	}
 
@@ -387,7 +388,12 @@ func runDoltInitRig(cmd *cobra.Command, args []string) error {
 	fmt.Printf("%s Initialized rig database %q\n", style.Bold.Render("✓"), rigName)
 	fmt.Printf("  Location: %s\n", rigDir)
 	fmt.Printf("  Data dir: %s\n", config.DataDir)
-	fmt.Printf("\nStart server with: %s\n", style.Dim.Render("gt dolt start"))
+
+	if serverWasRunning {
+		fmt.Printf("  Server: %s\n", style.Bold.Render("database registered with running server"))
+	} else {
+		fmt.Printf("\nStart server with: %s\n", style.Dim.Render("gt dolt start"))
+	}
 
 	return nil
 }
