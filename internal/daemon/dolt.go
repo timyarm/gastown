@@ -791,12 +791,8 @@ func (m *DoltServerManager) checkHealthLocked() error {
 	defer cancel()
 
 	start := time.Now()
-	cmd := exec.CommandContext(ctx, "dolt", "sql",
-		"--host", m.config.Host,
-		"--port", strconv.Itoa(m.config.Port),
-		"--no-auto-commit",
-		"-q", "SELECT 1",
-	)
+	cmd := exec.CommandContext(ctx, "dolt", "sql", "-q", "SELECT 1")
+	cmd.Dir = m.config.DataDir
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -825,12 +821,10 @@ func (m *DoltServerManager) checkConnectionCount() {
 	ctx, cancel := context.WithTimeout(context.Background(), doltCmdTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "dolt", "sql",
-		"--host", m.config.Host,
-		"--port", strconv.Itoa(m.config.Port),
-		"--no-auto-commit",
-		"--result-format", "csv",
+		"-r", "csv",
 		"-q", "SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST",
 	)
+	cmd.Dir = m.config.DataDir
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -904,12 +898,10 @@ func (m *DoltServerManager) listDatabases() ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), doltCmdTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "dolt", "sql",
-		"--host", m.config.Host,
-		"--port", strconv.Itoa(m.config.Port),
-		"--no-auto-commit",
+		"-r", "json",
 		"-q", "SHOW DATABASES",
-		"--result-format", "json",
 	)
+	cmd.Dir = m.config.DataDir
 
 	output, err := cmd.Output()
 	if err != nil {
