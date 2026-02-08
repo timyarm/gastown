@@ -861,6 +861,7 @@ type ZombieResult struct {
 type DetectZombiePolecatsResult struct {
 	Checked int
 	Zombies []ZombieResult
+	Errors  []error // Transient errors that prevented checking some polecats
 }
 
 // DetectZombiePolecats cross-references polecat agent state with tmux session
@@ -917,8 +918,15 @@ func DetectZombiePolecats(workDir, rigName string, router *mail.Router) *DetectZ
 
 		// Check if tmux session exists
 		sessionAlive, err := t.HasSession(sessionName)
-		if err != nil || sessionAlive {
-			continue // Session exists or error checking — not a zombie
+		if err != nil {
+			// Transient tmux error — record it so the caller knows detection
+			// was incomplete, rather than silently skipping this polecat.
+			result.Errors = append(result.Errors,
+				fmt.Errorf("checking session %s: %w", sessionName, err))
+			continue
+		}
+		if sessionAlive {
+			continue // Session exists — not a zombie
 		}
 
 		// Session is dead. Check agent bead state.
