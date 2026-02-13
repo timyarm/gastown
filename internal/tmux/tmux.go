@@ -862,11 +862,61 @@ func (t *Tmux) WakePaneIfDetached(target string) {
 	t.WakePane(target)
 }
 
+// isTransientSendKeysError returns true if the error from tmux send-keys is
+// transient and safe to retry. "not in a mode" occurs when the target pane's
+// TUI hasn't initialized its input handling yet (common during cold startup).
+func isTransientSendKeysError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "not in a mode")
+}
+
+// sendKeysLiteralWithRetry sends literal text to a tmux target, retrying on
+// transient errors (e.g., "not in a mode" during agent TUI startup).
+// This is the core retry loop used by both NudgeSession and NudgePane.
+//
+// Returns nil on success, or the last error after all retries are exhausted.
+// Non-transient errors (session not found, no server) fail immediately.
+//
+// Related upstream issues:
+//   - #1216: Nudge delivery reliability (input collision — NOT addressed here)
+//   - #1275: Graceful nudge delivery (work interruption — NOT addressed here)
+//
+// This function ONLY addresses the startup race where the agent TUI hasn't
+// initialized yet, causing tmux send-keys to fail with "not in a mode".
+func (t *Tmux) sendKeysLiteralWithRetry(target, text string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	interval := constants.NudgeRetryInterval
+	var lastErr error
+
+	for time.Now().Before(deadline) {
+		_, err := t.run("send-keys", "-t", target, "-l", text)
+		if err == nil {
+			return nil
+		}
+		if !isTransientSendKeysError(err) {
+			return err // non-transient (session gone, no server) — fail fast
+		}
+		lastErr = err
+		time.Sleep(interval)
+		// Cap interval at 2s to stay responsive
+		if interval < 2*time.Second {
+			interval = interval * 3 / 2 // 500ms → 750ms → 1125ms → 1687ms → 2s cap
+		}
+	}
+	return fmt.Errorf("agent not ready for input after %s: %w", timeout, lastErr)
+}
+
 // NudgeSession sends a message to a Claude Code session reliably.
 // This is the canonical way to send messages to Claude sessions.
 // Uses: literal mode + 500ms debounce + ESC (for vim mode) + separate Enter.
 // After sending, triggers SIGWINCH to wake Claude in detached sessions.
 // Verification is the Witness's job (AI), not this function.
+//
+// If the agent TUI hasn't initialized yet (cold startup), retries with backoff
+// up to NudgeReadyTimeout before giving up. See sendKeysLiteralWithRetry.
 //
 // IMPORTANT: Nudges to the same session are serialized to prevent interleaving.
 // If multiple goroutines try to nudge the same session concurrently, they will
@@ -887,8 +937,8 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		target = agentPane
 	}
 
-	// 1. Send text in literal mode (handles special characters)
-	if _, err := t.run("send-keys", "-t", target, "-l", message); err != nil {
+	// 1. Send text in literal mode with retry on transient errors
+	if err := t.sendKeysLiteralWithRetry(target, message, constants.NudgeReadyTimeout); err != nil {
 		return err
 	}
 
@@ -929,8 +979,8 @@ func (t *Tmux) NudgePane(pane, message string) error {
 	}
 	defer releaseNudgeLock(pane)
 
-	// 1. Send text in literal mode (handles special characters)
-	if _, err := t.run("send-keys", "-t", pane, "-l", message); err != nil {
+	// 1. Send text in literal mode with retry on transient errors
+	if err := t.sendKeysLiteralWithRetry(pane, message, constants.NudgeReadyTimeout); err != nil {
 		return err
 	}
 
