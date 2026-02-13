@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -478,6 +479,65 @@ func TestIsRuntimeRunning_ShellWithNodeChild(t *testing.T) {
 		t.Logf("Pane command: %q, IsRuntimeRunning: %v", paneCmd, got)
 		// Note: This may or may not detect depending on how tmux runs the command.
 		// On some systems, tmux runs the command directly; on others via a shell.
+	}
+}
+
+// TestGetPaneCommand_MultiPane verifies that GetPaneCommand returns pane 0's
+// command even when a split pane exists and is active. This is the core fix
+// for gs-2v7: without explicit pane 0 targeting, health checks would see the
+// split pane's shell and falsely report the agent as dead.
+func TestGetPaneCommand_MultiPane(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	tm := NewTmux()
+	sessionName := "gt-test-multipane-" + t.Name()
+
+	_ = tm.KillSession(sessionName)
+
+	// Create session running sleep (simulates an agent process in pane 0)
+	if err := tm.NewSessionWithCommand(sessionName, "", "sleep 300"); err != nil {
+		t.Fatalf("NewSessionWithCommand: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	// Verify pane 0 shows "sleep"
+	cmd, err := tm.GetPaneCommand(sessionName)
+	if err != nil {
+		t.Fatalf("GetPaneCommand before split: %v", err)
+	}
+	if cmd != "sleep" {
+		t.Fatalf("expected pane 0 command to be 'sleep', got %q", cmd)
+	}
+
+	// Split the window — creates a new pane running a shell, which becomes active
+	if _, err := tm.run("split-window", "-t", sessionName, "-d"); err != nil {
+		t.Fatalf("split-window: %v", err)
+	}
+
+	// GetPaneCommand should still return "sleep" (pane 0), not the shell
+	cmd, err = tm.GetPaneCommand(sessionName)
+	if err != nil {
+		t.Fatalf("GetPaneCommand after split: %v", err)
+	}
+	if cmd != "sleep" {
+		t.Errorf("after split, GetPaneCommand should return pane 0 command 'sleep', got %q", cmd)
+	}
+
+	// GetPanePID should return pane 0's PID, not the split pane's
+	pid, err := tm.GetPanePID(sessionName)
+	if err != nil {
+		t.Fatalf("GetPanePID after split: %v", err)
+	}
+	if pid == "" {
+		t.Error("GetPanePID returned empty after split")
+	}
+	// Verify the PID belongs to the sleep process
+	if pidInt, err := strconv.Atoi(pid); err != nil {
+		t.Errorf("GetPanePID returned non-numeric PID %q after split", pid)
+	} else if pidInt <= 0 {
+		t.Errorf("GetPanePID returned invalid PID %d after split", pidInt)
 	}
 }
 

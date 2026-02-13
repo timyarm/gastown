@@ -1002,7 +1002,12 @@ func (t *Tmux) AcceptBypassPermissionsWarning(session string) error {
 // GetPaneCommand returns the current command running in a pane.
 // Returns "bash", "zsh", "claude", "node", etc.
 func (t *Tmux) GetPaneCommand(session string) (string, error) {
-	out, err := t.run("list-panes", "-t", session, "-F", "#{pane_current_command}")
+	// Use display-message targeting pane 0 explicitly (:0.0) to avoid
+	// returning the active pane's command in multi-pane sessions.
+	// Agent processes always run in pane 0; without explicit targeting,
+	// a user-created split pane (running a shell) could cause health
+	// checks to falsely report the agent as dead.
+	out, err := t.run("display-message", "-t", session+":0.0", "-p", "#{pane_current_command}")
 	if err != nil {
 		return "", err
 	}
@@ -1085,8 +1090,10 @@ func (t *Tmux) GetPaneID(session string) (string, error) {
 }
 
 // GetPaneWorkDir returns the current working directory of a pane.
+// Targets pane 0 explicitly to avoid returning the active pane's
+// working directory in multi-pane sessions.
 func (t *Tmux) GetPaneWorkDir(session string) (string, error) {
-	out, err := t.run("list-panes", "-t", session, "-F", "#{pane_current_path}")
+	out, err := t.run("display-message", "-t", session+":0.0", "-p", "#{pane_current_path}")
 	if err != nil {
 		return "", err
 	}
@@ -1094,8 +1101,15 @@ func (t *Tmux) GetPaneWorkDir(session string) (string, error) {
 }
 
 // GetPanePID returns the PID of the pane's main process.
-func (t *Tmux) GetPanePID(session string) (string, error) {
-	out, err := t.run("list-panes", "-t", session, "-F", "#{pane_pid}")
+// When target is a session name, explicitly targets pane 0 (:0.0) to avoid
+// returning the active pane's PID in multi-pane sessions. When target is
+// a pane ID (e.g., "%5"), uses it directly.
+func (t *Tmux) GetPanePID(target string) (string, error) {
+	tmuxTarget := target
+	if !strings.HasPrefix(target, "%") {
+		tmuxTarget = target + ":0.0"
+	}
+	out, err := t.run("display-message", "-t", tmuxTarget, "-p", "#{pane_pid}")
 	if err != nil {
 		return "", err
 	}
