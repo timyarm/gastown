@@ -259,6 +259,47 @@ func (b *Beads) run(args ...string) ([]byte, error) {
 	return stdout.Bytes(), nil
 }
 
+// runWithRouting executes a bd command without setting BEADS_DIR, allowing bd's
+// native prefix-based routing via routes.jsonl to resolve cross-prefix beads.
+// This is needed for slot operations that reference beads with different prefixes
+// (e.g., setting an hq-* hook bead on a gt-* agent bead).
+// See: sling_helpers.go verifyBeadExists/hookBeadWithRetry for the same pattern.
+func (b *Beads) runWithRouting(args ...string) ([]byte, error) {
+	fullArgs := append([]string{"--allow-stale"}, args...)
+
+	cmd := exec.Command("bd", fullArgs...) //nolint:gosec // G204: bd is a trusted internal tool
+	cmd.Dir = b.workDir
+
+	// Build environment WITHOUT BEADS_DIR so bd discovers routes via directory traversal.
+	// In isolated mode, also filter other beads env vars for test isolation.
+	var env []string
+	if b.isolated {
+		env = filterBeadsEnv(os.Environ())
+	} else {
+		for _, e := range os.Environ() {
+			if !strings.HasPrefix(e, "BEADS_DIR=") {
+				env = append(env, e)
+			}
+		}
+	}
+	cmd.Env = env
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		return nil, b.wrapError(err, stderr.String(), args)
+	}
+
+	if stdout.Len() == 0 && stderr.Len() > 0 {
+		return nil, b.wrapError(fmt.Errorf("command produced no output"), stderr.String(), args)
+	}
+
+	return stdout.Bytes(), nil
+}
+
 // Run executes a bd command and returns stdout.
 // This is a public wrapper around the internal run method for cases where
 // callers need to run arbitrary bd commands.
