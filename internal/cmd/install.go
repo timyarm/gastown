@@ -182,31 +182,40 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		publicName = townName
 	}
 
-	// Create town.json in mayor/
-	townConfig := &config.TownConfig{
-		Type:       "town",
-		Version:    config.CurrentTownVersion,
-		Name:       townName,
-		Owner:      owner,
-		PublicName: publicName,
-		CreatedAt:  time.Now(),
-	}
+	// Create town.json in mayor/ (only if it doesn't already exist).
 	townPath := filepath.Join(mayorDir, "town.json")
-	if err := config.SaveTownConfig(townPath, townConfig); err != nil {
-		return fmt.Errorf("writing town.json: %w", err)
+	if _, err := os.Stat(townPath); os.IsNotExist(err) {
+		townConfig := &config.TownConfig{
+			Type:       "town",
+			Version:    config.CurrentTownVersion,
+			Name:       townName,
+			Owner:      owner,
+			PublicName: publicName,
+			CreatedAt:  time.Now(),
+		}
+		if err := config.SaveTownConfig(townPath, townConfig); err != nil {
+			return fmt.Errorf("writing town.json: %w", err)
+		}
+		fmt.Printf("   ✓ Created mayor/town.json\n")
+	} else {
+		fmt.Printf("   • mayor/town.json already exists, preserving\n")
 	}
-	fmt.Printf("   ✓ Created mayor/town.json\n")
 
-	// Create rigs.json in mayor/
-	rigsConfig := &config.RigsConfig{
-		Version: config.CurrentRigsVersion,
-		Rigs:    make(map[string]config.RigEntry),
-	}
+	// Create rigs.json in mayor/ (only if it doesn't already exist).
+	// Re-running install must NOT clobber existing rig registrations.
 	rigsPath := filepath.Join(mayorDir, "rigs.json")
-	if err := config.SaveRigsConfig(rigsPath, rigsConfig); err != nil {
-		return fmt.Errorf("writing rigs.json: %w", err)
+	if _, err := os.Stat(rigsPath); os.IsNotExist(err) {
+		rigsConfig := &config.RigsConfig{
+			Version: config.CurrentRigsVersion,
+			Rigs:    make(map[string]config.RigEntry),
+		}
+		if err := config.SaveRigsConfig(rigsPath, rigsConfig); err != nil {
+			return fmt.Errorf("writing rigs.json: %w", err)
+		}
+		fmt.Printf("   ✓ Created mayor/rigs.json\n")
+	} else {
+		fmt.Printf("   • mayor/rigs.json already exists, preserving\n")
 	}
-	fmt.Printf("   ✓ Created mayor/rigs.json\n")
 
 	// Create a generic CLAUDE.md at the town root as an identity anchor.
 	// Claude Code sets its CWD to the git root (~/gt/), so mayor/CLAUDE.md is
