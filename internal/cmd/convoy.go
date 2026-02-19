@@ -445,6 +445,11 @@ func runConvoyCreate(cmd *cobra.Command, args []string) error {
 		description += fmt.Sprintf("\nMolecule: %s", convoyMolecule)
 	}
 
+	// Guard against flag-like convoy names (gt-e0kx5)
+	if beads.IsFlagLikeTitle(name) {
+		return fmt.Errorf("refusing to create convoy: name %q looks like a CLI flag", name)
+	}
+
 	// Generate convoy ID with cv- prefix
 	convoyID := fmt.Sprintf("hq-cv-%s", generateShortID())
 
