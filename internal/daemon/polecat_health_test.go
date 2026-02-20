@@ -1,11 +1,14 @@
 package daemon
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -25,16 +28,16 @@ func writeFakeTestTmux(t *testing.T, dir string) {
 }
 
 // writeFakeTestBD creates a shell script in dir named "bd" that outputs a
-// polecat agent bead JSON with the given agentState and hookBead values.
-// The description field contains "agent_state: <agentState>" which is parsed
-// by ParseAgentFieldsFromDescription to populate AgentBeadInfo.State.
-func writeFakeTestBD(t *testing.T, dir, agentState, hookBead string) string {
+// polecat agent bead JSON. The descState parameter controls what appears in
+// the description text (parsed by ParseAgentFieldsFromDescription), while
+// dbState controls the agent_state database column. updatedAt controls the
+// bead's updated_at timestamp for time-bound testing.
+func writeFakeTestBD(t *testing.T, dir, descState, dbState, hookBead, updatedAt string) string {
 	t.Helper()
-	// description parsed by ParseAgentFieldsFromDescription for State field
-	desc := "agent_state: " + agentState
+	desc := "agent_state: " + descState
 	// JSON matches the structure that getAgentBeadInfo expects from bd show --json
-	bdJSON := `[{"id":"gt-myr-polecat-mycat","issue_type":"agent","labels":["gt:agent"],"description":"` +
-		desc + `","hook_bead":"` + hookBead + `","agent_state":"` + agentState + `","updated_at":"2024-01-01T00:00:00Z"}]`
+	bdJSON := fmt.Sprintf(`[{"id":"gt-myr-polecat-mycat","issue_type":"agent","labels":["gt:agent"],"description":"%s","hook_bead":"%s","agent_state":"%s","updated_at":"%s"}]`,
+		desc, hookBead, dbState, updatedAt)
 	script := "#!/bin/sh\necho '" + bdJSON + "'\n"
 	path := filepath.Join(dir, "bd")
 	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
@@ -44,16 +47,20 @@ func writeFakeTestBD(t *testing.T, dir, agentState, hookBead string) string {
 }
 
 // TestCheckPolecatHealth_SkipsSpawning verifies that checkPolecatHealth does NOT
-// attempt to restart a polecat in agent_state=spawning. This is the regression
-// test for the double-spawn bug (issue #1752): the daemon heartbeat fires during
-// the window between bead creation (hook_bead set atomically by gt sling) and the
-// actual tmux session launch, causing a second Claude process to start.
+// attempt to restart a polecat in agent_state=spawning when recently updated.
+// This is the regression test for the double-spawn bug (issue #1752): the daemon
+// heartbeat fires during the window between bead creation (hook_bead set atomically
+// by gt sling) and the actual tmux session launch, causing a second Claude process.
 func TestCheckPolecatHealth_SkipsSpawning(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks for tmux and bd")
+	}
 	binDir := t.TempDir()
 	writeFakeTestTmux(t, binDir)
-	bdPath := writeFakeTestBD(t, binDir, "spawning", "gt-xyz")
+	// Use a recent timestamp so the spawning guard's time-bound is satisfied
+	recentTime := time.Now().UTC().Format(time.RFC3339)
+	bdPath := writeFakeTestBD(t, binDir, "spawning", "spawning", "gt-xyz", recentTime)
 
-	// Prepend binDir to PATH so exec.Command("tmux",...) finds our fake binary.
 	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	var logBuf strings.Builder
@@ -80,9 +87,13 @@ func TestCheckPolecatHealth_SkipsSpawning(t *testing.T) {
 // This ensures the spawning guard in issue #1752 does not accidentally suppress
 // legitimate crash detection for polecats that were running normally.
 func TestCheckPolecatHealth_DetectsCrashedPolecat(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks for tmux and bd")
+	}
 	binDir := t.TempDir()
 	writeFakeTestTmux(t, binDir)
-	bdPath := writeFakeTestBD(t, binDir, "working", "gt-xyz")
+	recentTime := time.Now().UTC().Format(time.RFC3339)
+	bdPath := writeFakeTestBD(t, binDir, "working", "working", "gt-xyz", recentTime)
 
 	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
@@ -99,5 +110,77 @@ func TestCheckPolecatHealth_DetectsCrashedPolecat(t *testing.T) {
 	got := logBuf.String()
 	if !strings.Contains(got, "CRASH DETECTED") {
 		t.Errorf("expected CRASH DETECTED for working polecat with dead session, got: %q", got)
+	}
+}
+
+// TestCheckPolecatHealth_SpawningGuardExpires verifies that the spawning guard
+// has a time-bound: polecats stuck in agent_state=spawning for more than 5 minutes
+// are treated as crashed (gt sling may have failed during spawn).
+func TestCheckPolecatHealth_SpawningGuardExpires(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks for tmux and bd")
+	}
+	binDir := t.TempDir()
+	writeFakeTestTmux(t, binDir)
+	// Use a timestamp >5 minutes ago to expire the spawning guard
+	oldTime := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+	bdPath := writeFakeTestBD(t, binDir, "spawning", "spawning", "gt-xyz", oldTime)
+
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	var logBuf strings.Builder
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(&logBuf, "", 0),
+		tmux:   tmux.NewTmux(),
+		bdPath: bdPath,
+	}
+
+	d.checkPolecatHealth("myr", "mycat")
+
+	got := logBuf.String()
+	if !strings.Contains(got, "Spawning guard expired") {
+		t.Errorf("expected spawning guard to expire for old timestamp, got: %q", got)
+	}
+	if !strings.Contains(got, "CRASH DETECTED") {
+		t.Errorf("expected CRASH DETECTED after spawning guard expires, got: %q", got)
+	}
+}
+
+// TestCheckPolecatHealth_DBStateOverridesDescription verifies that the daemon
+// reads agent_state from the DB column (source of truth), not the description
+// text. UpdateAgentState updates the DB column but not the description, so a
+// polecat that transitioned from "spawning" to "working" will have stale
+// description text. The DB column must be authoritative.
+func TestCheckPolecatHealth_DBStateOverridesDescription(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks for tmux and bd")
+	}
+	binDir := t.TempDir()
+	writeFakeTestTmux(t, binDir)
+	recentTime := time.Now().UTC().Format(time.RFC3339)
+	// Description says "spawning" (stale) but DB column says "working" (truth)
+	bdPath := writeFakeTestBD(t, binDir, "spawning", "working", "gt-xyz", recentTime)
+
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	var logBuf strings.Builder
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(&logBuf, "", 0),
+		tmux:   tmux.NewTmux(),
+		bdPath: bdPath,
+	}
+
+	d.checkPolecatHealth("myr", "mycat")
+
+	got := logBuf.String()
+	// Should NOT skip due to spawning guard — DB says "working"
+	if strings.Contains(got, "Skipping restart") {
+		t.Errorf("daemon should use DB agent_state (working), not stale description (spawning), got: %q", got)
+	}
+	// Should detect crash since DB says working + session is dead
+	if !strings.Contains(got, "CRASH DETECTED") {
+		t.Errorf("expected CRASH DETECTED when DB state is 'working' with dead session, got: %q", got)
 	}
 }
