@@ -18,13 +18,12 @@ func TestStepDriftCmd_Registered(t *testing.T) {
 }
 
 func TestStepDriftCmd_HasFlags(t *testing.T) {
-	flags := []string{"agent", "nudge", "threshold", "watch"}
+	flags := []string{"agent", "nudge", "peek", "rig", "threshold", "watch"}
 	for _, name := range flags {
 		if patrolStepDriftCmd.Flags().Lookup(name) == nil {
 			t.Errorf("missing flag: --%s", name)
 		}
 	}
-	// Check -w shorthand for --watch
 	if patrolStepDriftCmd.Flags().ShorthandLookup("w") == nil {
 		t.Error("missing shorthand -w for --watch")
 	}
@@ -42,10 +41,10 @@ func TestStepDriftCmd_ThresholdDefault(t *testing.T) {
 
 func TestMatchStep(t *testing.T) {
 	statuses := map[string]bool{
-		"Load context and start":      true,
-		"Set up working branch":       true,
+		"Load context and start":       true,
+		"Set up working branch":        true,
 		"Verify tests pass (precheck)": false,
-		"Implement the feature":       false,
+		"Implement the feature":        false,
 	}
 
 	tests := []struct {
@@ -70,34 +69,58 @@ func TestMatchStep(t *testing.T) {
 }
 
 func TestCountClosedSteps(t *testing.T) {
-	// All closed
-	all := map[string]bool{
-		"Load context":          true,
-		"Set up working branch": true,
-		"Verify tests pass":     true,
-		"Implement":             true,
-		"Self-review":           true,
-		"Run tests":             true,
-		"Clean up":              true,
-		"Prepare work":          true,
-		"Submit work":           true,
-	}
-	if got := countClosedSteps(all); got != 9 {
-		t.Errorf("countClosedSteps(all) = %d, want 9", got)
+	tests := []struct {
+		name     string
+		statuses map[string]bool
+		want     int
+	}{
+		{
+			name: "all closed",
+			statuses: map[string]bool{
+				"Load context":          true,
+				"Set up working branch": true,
+				"Verify tests pass":     true,
+				"Implement":             true,
+				"Self-review":           true,
+				"Run tests":             true,
+				"Clean up":              true,
+				"Prepare work":          true,
+				"Submit work":           true,
+			},
+			want: 9,
+		},
+		{
+			name: "none closed",
+			statuses: map[string]bool{
+				"Load context":          false,
+				"Set up working branch": false,
+			},
+			want: 0,
+		},
+		{
+			name:     "nil map",
+			statuses: nil,
+			want:     0,
+		},
+		{
+			name: "partial with fuzzy names",
+			statuses: map[string]bool{
+				"Load context and verify assignment": true,
+				"Set up working branch":              true,
+				"Verify tests pass on base branch":   true,
+				"Implement the solution":             false,
+				"Self-review changes":                false,
+			},
+			want: 3,
+		},
 	}
 
-	// None closed
-	none := map[string]bool{
-		"Load context":          false,
-		"Set up working branch": false,
-	}
-	if got := countClosedSteps(none); got != 0 {
-		t.Errorf("countClosedSteps(none) = %d, want 0", got)
-	}
-
-	// Nil map
-	if got := countClosedSteps(nil); got != 0 {
-		t.Errorf("countClosedSteps(nil) = %d, want 0", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := countClosedSteps(tt.statuses); got != tt.want {
+				t.Errorf("countClosedSteps() = %d, want %d", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -119,29 +142,22 @@ func TestRoundTo1(t *testing.T) {
 	}
 }
 
-func TestStepDriftResult_JSON(t *testing.T) {
+func TestStepDriftResult_ErrorField(t *testing.T) {
 	r := StepDriftResult{
-		Rig:      "gastown",
-		Name:     "alpha",
-		Bead:     "gt-abc123",
-		Title:    "Test bead",
-		State:    "working",
-		AgeMin:   12.3,
-		Closed:   3,
-		Total:    9,
-		Drifting: false,
-		Nudged:   false,
-		Branch:   "polecat-alpha-1234567890",
+		Rig:   "gastown",
+		Name:  "alpha",
+		Error: "could not find Dolt branch",
+	}
+	if r.Error == "" {
+		t.Error("Error field should not be empty")
 	}
 
-	if r.Rig != "gastown" {
-		t.Errorf("Rig = %q, want %q", r.Rig, "gastown")
+	r2 := StepDriftResult{
+		Rig:  "gastown",
+		Name: "beta",
 	}
-	if r.Total != 9 {
-		t.Errorf("Total = %d, want 9", r.Total)
-	}
-	if r.Drifting {
-		t.Error("Drifting should be false when closed > 0")
+	if r2.Error != "" {
+		t.Errorf("Error field should be empty, got %q", r2.Error)
 	}
 }
 
@@ -154,5 +170,27 @@ func TestStepsOrder(t *testing.T) {
 	}
 	if stepsOrder[8] != "Submit work" {
 		t.Errorf("last step = %q, want %q", stepsOrder[8], "Submit work")
+	}
+}
+
+func TestReadStepStatus_EmptyWisp(t *testing.T) {
+	// Should return nil for empty wisp ID without making any external calls
+	result := readStepStatus("", "some-branch")
+	if result != nil {
+		t.Errorf("readStepStatus with empty wispID should return nil, got %v", result)
+	}
+}
+
+func TestMatchStep_CaseInsensitive(t *testing.T) {
+	statuses := map[string]bool{
+		"LOAD CONTEXT AND VERIFY": true,
+		"run tests (quality)":     false,
+	}
+
+	if !matchStep("Load context", statuses) {
+		t.Error("matchStep should be case-insensitive")
+	}
+	if matchStep("Run tests", statuses) {
+		t.Error("matchStep should return false for unclosed steps")
 	}
 }

@@ -1,14 +1,17 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -19,6 +22,8 @@ import (
 var (
 	stepDriftAgent     bool
 	stepDriftNudge     bool
+	stepDriftPeek      bool
+	stepDriftRig       string
 	stepDriftThreshold int
 	stepDriftWatch     bool
 )
@@ -53,7 +58,9 @@ to get true closure state. Detects "step drift" — when a polecat has been
 working for a threshold duration without closing any steps.
 
 Examples:
-  gt patrol step-drift                  # Human-readable display with peek
+  gt patrol step-drift                  # Human-readable display
+  gt patrol step-drift --peek           # Include recent polecat output
+  gt patrol step-drift --rig gastown    # Only check polecats in one rig
   gt patrol step-drift --watch          # Live dashboard, refresh every 30s
   gt patrol step-drift --watch 10       # Custom refresh interval
   gt patrol step-drift --agent          # JSON report (for deacon/scripts)
@@ -76,11 +83,14 @@ type StepDriftResult struct {
 	Drifting bool    `json:"drifting"`
 	Nudged   bool    `json:"nudged"`
 	Branch   string  `json:"branch"`
+	Error    string  `json:"error,omitempty"`
 }
 
 func init() {
 	patrolStepDriftCmd.Flags().BoolVar(&stepDriftAgent, "agent", false, "JSON output for deacon/scripts")
 	patrolStepDriftCmd.Flags().BoolVar(&stepDriftNudge, "nudge", false, "Nudge drifting polecats")
+	patrolStepDriftCmd.Flags().BoolVar(&stepDriftPeek, "peek", false, "Include recent polecat output in human-readable mode")
+	patrolStepDriftCmd.Flags().StringVar(&stepDriftRig, "rig", "", "Only check polecats in this rig")
 	patrolStepDriftCmd.Flags().IntVar(&stepDriftThreshold, "threshold", 5, "Drift threshold in minutes")
 	patrolStepDriftCmd.Flags().BoolVarP(&stepDriftWatch, "watch", "w", false, "Live dashboard mode")
 }
@@ -94,6 +104,8 @@ func runPatrolStepDrift(cmd *cobra.Command, args []string) error {
 	}
 
 	if stepDriftWatch {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
 		for {
 			// Clear screen
 			fmt.Print("\033[2J\033[H")
@@ -106,7 +118,11 @@ func runPatrolStepDrift(cmd *cobra.Command, args []string) error {
 			}
 			renderStepDriftPretty(results)
 
-			time.Sleep(time.Duration(interval) * time.Second)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(time.Duration(interval) * time.Second):
+			}
 		}
 	}
 
@@ -133,15 +149,32 @@ func checkStepDrift(thresholdMinutes int) []StepDriftResult {
 	if err != nil {
 		return nil
 	}
-	doltDataDir := filepath.Join(townRoot, ".dolt-data")
+
+	polecats := listAllPolecats()
+	if stepDriftRig != "" {
+		var filtered []polecatInfo
+		for _, p := range polecats {
+			if p.rig == stepDriftRig {
+				filtered = append(filtered, p)
+			}
+		}
+		polecats = filtered
+	}
 
 	var results []StepDriftResult
-	for _, p := range listAllPolecats() {
-		branch := findDoltBranch(doltDataDir, p.rig, p.name)
+	for _, p := range polecats {
+		branch := findDoltBranch(townRoot, p.rig, p.name)
 		wispID := findWispID(p.bead)
 		statuses := readStepStatus(wispID, branch)
 		closed := countClosedSteps(statuses)
 		age := sessionAgeMinutes(p.rig, p.name)
+
+		var errMsg string
+		if branch == "" && p.bead != "" {
+			errMsg = "could not find Dolt branch"
+		} else if wispID == "" && p.bead != "" {
+			errMsg = "could not find attached molecule"
+		}
 
 		results = append(results, StepDriftResult{
 			Rig:      p.rig,
@@ -155,6 +188,7 @@ func checkStepDrift(thresholdMinutes int) []StepDriftResult {
 			Drifting: age >= float64(thresholdMinutes) && closed == 0,
 			Nudged:   false,
 			Branch:   branch,
+			Error:    errMsg,
 		})
 	}
 	return results
@@ -240,45 +274,31 @@ func listPolecatsForRig(rig string) []polecatInfo {
 	return result
 }
 
-// findDoltBranch finds the most recent Dolt branch for a polecat.
-func findDoltBranch(doltDataDir, rig, name string) string {
-	rigData := filepath.Join(doltDataDir, rig)
-	if info, err := os.Stat(rigData); err != nil || !info.IsDir() {
-		return ""
-	}
+// findDoltBranch finds the most recent Dolt branch for a polecat via SQL server.
+// Uses the running Dolt server rather than CLI against the data directory.
+func findDoltBranch(townRoot, rig, name string) string {
+	doltDataDir := filepath.Join(townRoot, ".dolt-data")
+	prefix := fmt.Sprintf("polecat-%s-%%", strings.ToLower(name))
+	query := fmt.Sprintf("USE %s; SELECT name FROM dolt_branches WHERE name LIKE '%s' ORDER BY name DESC LIMIT 1", rig, prefix)
 
-	cmd := exec.Command("dolt", "branch")
-	cmd.Dir = rigData
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "dolt", "sql", "-q", query, "-r", "csv")
+	cmd.Dir = doltDataDir
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}
 
-	prefix := fmt.Sprintf("polecat-%s-", strings.ToLower(name))
-	var branches []string
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(strings.TrimLeft(line, "* "))
-		if strings.Contains(line, prefix) {
-			branches = append(branches, line)
+	// Parse CSV output: header line then data line
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" && line != "name" && strings.HasPrefix(line, "polecat-") {
+			return line
 		}
 	}
-	if len(branches) == 0 {
-		return ""
-	}
-
-	// Sort by trailing timestamp (numeric suffix)
-	maxTS := 0
-	best := branches[0]
-	for _, b := range branches {
-		parts := strings.Split(b, "-")
-		if len(parts) > 0 {
-			if ts, err := strconv.Atoi(parts[len(parts)-1]); err == nil && ts > maxTS {
-				maxTS = ts
-				best = b
-			}
-		}
-	}
-	return best
+	return ""
 }
 
 // fetchBeadTitle extracts the title from a bead's show output.
@@ -342,7 +362,7 @@ func readStepStatus(wispID, doltBranch string) map[string]bool {
 
 	cmd := exec.Command("bd", "show", wispID)
 	if doltBranch != "" {
-		cmd.Env = append(os.Environ(), "BD_DOLT_BRANCH="+doltBranch)
+		cmd.Env = append(os.Environ(), "BD_BRANCH="+doltBranch)
 	}
 	out, err := cmd.Output()
 	if err != nil {
@@ -425,12 +445,6 @@ func renderStepDriftPretty(results []StepDriftResult) {
 	}
 
 	for _, p := range results {
-		progress := make([]byte, p.Total)
-		for i := 0; i < p.Total; i++ {
-			if i < p.Closed {
-				progress[i] = '\xe2' // will use string builder
-			}
-		}
 		var progressStr string
 		for i := 0; i < p.Total; i++ {
 			if i < p.Closed {
@@ -456,24 +470,29 @@ func renderStepDriftPretty(results []StepDriftResult) {
 		fmt.Printf("  ▶ %-10s %-12s %s  %s %s %s\n",
 			p.Name, p.Bead, progressStr, title, stateStr, ageStr)
 
-		peek := peekPolecat(p.Rig, p.Name, 20)
-		if peek != "" {
-			lines := strings.Split(peek, "\n")
-			// Show last 20 non-empty lines
-			var tail []string
-			for _, l := range lines {
-				if strings.TrimSpace(l) != "" {
-					tail = append(tail, l)
+		if p.Error != "" {
+			fmt.Printf("    %s\n", style.Warning.Render("⚠ "+p.Error))
+		}
+
+		if stepDriftPeek {
+			peek := peekPolecat(p.Rig, p.Name, 20)
+			if peek != "" {
+				lines := strings.Split(peek, "\n")
+				var tail []string
+				for _, l := range lines {
+					if strings.TrimSpace(l) != "" {
+						tail = append(tail, l)
+					}
 				}
-			}
-			if len(tail) > 20 {
-				tail = tail[len(tail)-20:]
-			}
-			for _, line := range tail {
-				if len(line) > 100 {
-					line = line[:100]
+				if len(tail) > 20 {
+					tail = tail[len(tail)-20:]
 				}
-				fmt.Printf("    │ %s\n", line)
+				for _, line := range tail {
+					if len(line) > 100 {
+						line = line[:100]
+					}
+					fmt.Printf("    │ %s\n", line)
+				}
 			}
 		}
 
