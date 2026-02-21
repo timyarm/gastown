@@ -52,17 +52,26 @@ func trimJSONForError(jsonOutput []byte) string {
 // verifyFormulaExists checks that the formula exists using bd formula show.
 // Formulas are TOML files (.formula.toml).
 // Uses --allow-stale for consistency with verifyBeadExists.
-func verifyFormulaExists(formulaName string) error {
+// workDir controls where bd searches for formulas. When empty, uses CWD.
+// When a rig target is specified (e.g., "vastal"), pass the rig directory
+// so formulas in the rig's .beads/formulas/ are found regardless of CWD.
+func verifyFormulaExists(formulaName string, workDir string) error {
 	// Try bd formula show (handles all formula file formats)
 	// Use Output() instead of Run() to detect bd exit 0 bug:
 	// when formula not found, bd may exit 0 but produce empty stdout.
 	cmd := exec.Command("bd", "formula", "show", formulaName, "--allow-stale")
+	if workDir != "" {
+		cmd.Dir = workDir
+	}
 	if out, err := cmd.Output(); err == nil && len(out) > 0 {
 		return nil
 	}
 
 	// Try with mol- prefix
 	cmd = exec.Command("bd", "formula", "show", "mol-"+formulaName, "--allow-stale")
+	if workDir != "" {
+		cmd.Dir = workDir
+	}
 	if out, err := cmd.Output(); err == nil && len(out) > 0 {
 		return nil
 	}
@@ -106,6 +115,20 @@ func runSlingFormula(args []string) error {
 	delayedDogInfo := resolved.DelayedDogInfo
 	isSelfSling := resolved.IsSelfSling
 
+	// Compute rig root for formula operations (cook, wisp).
+	// When a polecat is spawned, resolved.WorkDir points to the polecat's project
+	// directory (e.g., ~/gt/vastal/polecats/slit/vastal/) which has .beads/redirect.
+	// But bd cook/wisp don't follow redirects — they need the actual rig root
+	// where .beads/formulas/ lives directly.
+	rigRoot := ""
+	if targetAgent != "" {
+		rigName := strings.SplitN(targetAgent, "/", 2)[0]
+		candidateRigRoot := filepath.Join(townRoot, rigName)
+		if info, err := os.Stat(filepath.Join(candidateRigRoot, ".beads", "formulas")); err == nil && info.IsDir() {
+			rigRoot = candidateRigRoot
+		}
+	}
+
 	fmt.Printf("%s Slinging formula %s to %s...\n", style.Bold.Render("🎯"), formulaName, targetAgent)
 
 	rollbackSpawned := func(beadID string) {
@@ -126,9 +149,12 @@ func runSlingFormula(args []string) error {
 		return nil
 	}
 
-	// Resolve working directory for bd commands (routes to correct rig beads)
-	// Fall back to townRoot (HQ beads) if no specific rig directory was determined
-	if formulaWorkDir == "" {
+	// Resolve working directory for bd cook/wisp (need actual .beads/formulas/).
+	// Polecat workdirs have .beads/redirect but bd cook/wisp don't follow redirects.
+	// Priority: rigRoot (has .beads/formulas/) > formulaWorkDir > townRoot.
+	if rigRoot != "" {
+		formulaWorkDir = rigRoot
+	} else if formulaWorkDir == "" {
 		formulaWorkDir = townRoot
 	}
 

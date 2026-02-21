@@ -240,6 +240,19 @@ func runSling(cmd *cobra.Command, args []string) error {
 	var formulaName string
 	attachedMoleculeID := ""
 
+	// Resolve rig directory for formula searches. When the target is a rig
+	// (e.g., "vastal"), formulas live in <townRoot>/<rig>/.beads/formulas/,
+	// not in <townRoot>/.beads/formulas/. Without this, verifyFormulaExists
+	// fails when CWD is the town root instead of the rig root.
+	formulaSearchDir := ""
+	if len(args) > 1 {
+		candidateRig := args[len(args)-1]
+		rigDir := filepath.Join(townRoot, candidateRig)
+		if info, err := os.Stat(filepath.Join(rigDir, ".beads")); err == nil && info.IsDir() {
+			formulaSearchDir = rigDir
+		}
+	}
+
 	if slingOnTarget != "" {
 		// Formula-on-bead mode: gt sling <formula> --on <bead>
 		formulaName = args[0]
@@ -248,7 +261,7 @@ func runSling(cmd *cobra.Command, args []string) error {
 		if err := verifyBeadExists(beadID); err != nil {
 			return err
 		}
-		if err := verifyFormulaExists(formulaName); err != nil {
+		if err := verifyFormulaExists(formulaName, formulaSearchDir); err != nil {
 			return err
 		}
 	} else {
@@ -261,13 +274,20 @@ func runSling(cmd *cobra.Command, args []string) error {
 			beadID = firstArg
 		} else {
 			// Not a verified bead - try as standalone formula
-			if err := verifyFormulaExists(firstArg); err == nil {
+			formulaErr := verifyFormulaExists(firstArg, formulaSearchDir)
+			if formulaErr == nil {
 				// Standalone formula mode: gt sling <formula> [target]
 				return runSlingFormula(args)
 			}
 			// Not a formula either - check if it looks like a bead ID (routing issue workaround).
 			// Accept it and let the actual bd update fail later if the bead doesn't exist.
 			// This fixes: gt sling bd-ka761 beads/crew/dave failing with 'not a valid bead or formula'
+			// BUT: don't misroute known formula prefixes (mol-*) to the bead path.
+			// When bd is busy (Dolt lock), formula verification fails transiently;
+			// "mol-foo" matches looksLikeBeadID but is clearly a formula, not a bead.
+			if strings.HasPrefix(firstArg, "mol-") {
+				return fmt.Errorf("formula '%s' not found or temporarily unavailable: %w", firstArg, formulaErr)
+			}
 			if looksLikeBeadID(firstArg) {
 				beadID = firstArg
 			} else {
