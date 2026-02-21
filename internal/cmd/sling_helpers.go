@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -89,7 +90,10 @@ func verifyBeadExists(beadID string) error {
 	if err != nil {
 		return fmt.Errorf("bead '%s' not found (bd show failed)", beadID)
 	}
-	if len(out) == 0 {
+	// Guard against bd exit-0 bug: bd may exit 0 but return non-JSON text
+	// like "No such occurrence" when the bead doesn't exist.
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return fmt.Errorf("bead '%s' not found", beadID)
 	}
 	return nil
