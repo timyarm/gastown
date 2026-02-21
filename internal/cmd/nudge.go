@@ -345,6 +345,15 @@ func runNudge(cmd *cobra.Command, args []string) error {
 			// Extract crew name and use crew session naming
 			crewName := strings.TrimPrefix(polecatName, "crew/")
 			sessionName = crewSessionName(rigName, crewName)
+		} else if strings.HasPrefix(polecatName, "polecats/") {
+			// Explicit polecat address (e.g., "vastal/polecats/furiosa").
+			// Bypasses crew-first resolution for short addresses.
+			pcName := strings.TrimPrefix(polecatName, "polecats/")
+			mgr, _, err := getSessionManager(rigName)
+			if err != nil {
+				return err
+			}
+			sessionName = mgr.SessionName(pcName)
 		} else {
 			// Short address (e.g., "gastown/holden") - could be crew or polecat.
 			// Try crew first (matches mail system's addressToSessionIDs pattern),
