@@ -108,8 +108,11 @@ func getBeadInfo(beadID string) (*beadInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bead '%s' not found", beadID)
 	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("bead '%s' not found", beadID)
+	// Guard against bd exit-0 bug: bd may exit 0 but return non-JSON text
+	// like "No such occurrence" when the bead doesn't exist.
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil, fmt.Errorf("bead '%s' not found (bd returned non-JSON)", beadID)
 	}
 	// bd show --json returns an array (issue + dependents), take first element
 	var infos []beadInfo
