@@ -517,9 +517,16 @@ func (b *Beads) Show(id string) (*Issue, error) {
 		return nil, err
 	}
 
+	// Guard against bd exit-0 bug: bd may exit 0 but return non-JSON text
+	// like "No such occurrence" when the bead doesn't exist.
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil, ErrNotFound
+	}
+
 	// bd show --json returns an array with one element
 	var issues []*Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
+	if err := json.Unmarshal(trimmed, &issues); err != nil {
 		return nil, fmt.Errorf("parsing bd show output: %w", err)
 	}
 
@@ -544,8 +551,14 @@ func (b *Beads) ShowMultiple(ids []string) (map[string]*Issue, error) {
 		return nil, fmt.Errorf("bd show: %w", err)
 	}
 
+	// Guard against bd exit-0 bug: non-JSON output when beads don't exist.
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return make(map[string]*Issue), nil
+	}
+
 	var issues []*Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
+	if err := json.Unmarshal(trimmed, &issues); err != nil {
 		return nil, fmt.Errorf("parsing bd show output: %w", err)
 	}
 
